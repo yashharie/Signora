@@ -95,7 +95,17 @@ func main() {
 
 func cors(origin string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
+		requestOrigin := r.Header.Get("Origin")
+		allowed := requestOrigin == origin ||
+			strings.HasSuffix(requestOrigin, ".vercel.app") ||
+			strings.HasSuffix(requestOrigin, ".railway.app") ||
+			requestOrigin == "http://localhost:3000" ||
+			requestOrigin == "http://localhost:3001"
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", requestOrigin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
