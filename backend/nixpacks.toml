@@ -1,11 +1,11 @@
-﻿[phases.setup]
-nixPkgs = ["go", "nodejs", "npm"]
+[phases.setup]
+nixPkgs = ["go_1_22", "nodejs_22", "npm-10_x"]
+
+[phases.install]
+cmds = ["npm install --omit=dev"]
 
 [phases.build]
-cmds = [
-  "go build -o signora ./cmd/server/main.go",
-  "npm install --omit=dev"
-]
+cmds = ["go build -o signora ./cmd/server/main.go"]
 
 [start]
 cmd = "./signora"
