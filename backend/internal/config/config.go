@@ -8,8 +8,13 @@ type Config struct {
 }
 
 func Load() Config {
+	// Railway injects PORT automatically — never hardcode it
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
 	return Config{
-		Port:        get("PORT", "8080"),
+		Port:        port,
 		DatabaseURL: get("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/signora_db?sslmode=disable"),
 		JWTSecret:   get("JWT_SECRET", "development_only_change_me"),
 		FrontendURL: get("FRONTEND_URL", "http://localhost:3000"),
