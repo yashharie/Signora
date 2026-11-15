@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"phase1-signora/backend/internal/config"
 	"phase1-signora/backend/internal/database"
@@ -21,10 +24,10 @@ func main() {
 	defer db.Close()
 
 	if err := os.MkdirAll(cfg.UploadDir, 0755); err != nil {
-		log.Fatal(err)
+		log.Printf("WARNING: MkdirAll UploadDir: %v", err)
 	}
 	if err := os.MkdirAll(cfg.SignedDir, 0755); err != nil {
-		log.Fatal(err)
+		log.Printf("WARNING: MkdirAll SignedDir: %v", err)
 	}
 
 	mailer := &services.Mailer{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser, Pass: cfg.SMTPPass}
@@ -41,10 +44,21 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	// Health check
+	// Health check - always returns 200 so Railway deployment health check passes
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"status":"ok"}`))
+		pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		dbStatus := "connected"
+		if db == nil || db.Ping(pingCtx) != nil {
+			dbStatus = "connecting_or_unavailable"
+		}
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":   "ok",
+			"database": dbStatus,
+			"service":  "signora-backend",
+		})
 	})
 
 	// Public Auth endpoints
@@ -96,19 +110,18 @@ func main() {
 func cors(origin string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestOrigin := r.Header.Get("Origin")
-		allowed := requestOrigin == origin ||
-			strings.HasSuffix(requestOrigin, ".vercel.app") ||
-			strings.HasSuffix(requestOrigin, ".railway.app") ||
-			requestOrigin == "http://localhost:3000" ||
-			requestOrigin == "http://localhost:3001"
-		if allowed {
+		if requestOrigin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", requestOrigin)
-		} else {
+		} else if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
 		}
 		w.Header().Set("Vary", "Origin")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Origin, X-Requested-With, Cache-Control")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD")
+		w.Header().Set("Access-Control-Max-Age", "86400")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -118,24 +131,27 @@ func cors(origin string, next http.Handler) http.Handler {
 }
 
 func loadEnvFile() {
-	f, err := os.Open(".env")
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+	for _, path := range []string{".env", "backend/.env"} {
+		f, err := os.Open(path)
+		if err != nil {
 			continue
 		}
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			value := strings.Trim(strings.TrimSpace(parts[1]), "\"'")
-			if os.Getenv(key) == "" {
-				_ = os.Setenv(key, value)
+		defer f.Close()
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.Trim(strings.TrimSpace(parts[1]), "\"'")
+				if os.Getenv(key) == "" {
+					_ = os.Setenv(key, value)
+				}
 			}
 		}
+		break
 	}
 }

@@ -2,13 +2,15 @@ package handlers
 
 import (
 	"encoding/json"
+	"log"
+	"net/http"
+	"strings"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
-	"net/http"
 	"phase1-signora/backend/internal/middleware"
 	"phase1-signora/backend/internal/utils"
-	"strings"
 )
 
 type AuthHandler struct {
@@ -22,6 +24,10 @@ type authInput struct {
 }
 
 func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
+	if h.DB == nil {
+		utils.Error(w, 503, "Database service is initializing, please try again in a moment")
+		return
+	}
 	var in authInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		utils.Error(w, 400, "Invalid request body")
@@ -41,7 +47,12 @@ func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	var id string
 	err = h.DB.QueryRow(r.Context(), `INSERT INTO users(name,email,password_hash) VALUES($1,$2,$3) RETURNING id`, in.Name, in.Email, string(hash)).Scan(&id)
 	if err != nil {
-		utils.Error(w, 409, "Email is already registered or could not be saved")
+		log.Printf("Register error: %v", err)
+		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "users_email_key") {
+			utils.Error(w, 409, "Email is already registered")
+		} else {
+			utils.Error(w, 500, "Could not save user: "+err.Error())
+		}
 		return
 	}
 	token, err := middleware.NewToken(id, h.Secret)
@@ -51,7 +62,12 @@ func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	utils.JSON(w, 201, map[string]any{"message": "Registration successful", "token": token, "user": map[string]string{"id": id, "name": in.Name, "email": in.Email}})
 }
+
 func (h AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	if h.DB == nil {
+		utils.Error(w, 503, "Database service is initializing, please try again in a moment")
+		return
+	}
 	var in authInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		utils.Error(w, 400, "Invalid request body")
@@ -71,7 +87,12 @@ func (h AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	utils.JSON(w, 200, map[string]any{"message": "Login successful", "token": token, "user": map[string]string{"id": id, "name": name, "email": email}})
 }
+
 func (h AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
+	if h.DB == nil {
+		utils.Error(w, 503, "Database service is initializing, please try again in a moment")
+		return
+	}
 	id := middleware.CurrentUserID(r)
 	var name, email string
 	err := h.DB.QueryRow(r.Context(), `SELECT name,email FROM users WHERE id=$1`, id).Scan(&name, &email)
