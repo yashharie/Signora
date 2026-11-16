@@ -66,6 +66,8 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [downloading, setDownloading] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenMsg, setRegenMsg] = useState('');
   const [copiedToken, setCopiedToken] = useState<string | null>(null);
   const [linkError, setLinkError] = useState('');
 
@@ -94,6 +96,7 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
   async function downloadSignedPdf() {
     try {
       setDownloading(true);
+      setError('');
       const res = await api.get(`/api/documents/${docId}/signed-download`, {
         responseType: 'blob',
       });
@@ -105,10 +108,29 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 60000);
-    } catch (err) {
-      setError(getError(err));
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setError('Signed PDF is missing on the server (server was redeployed). Click "Regenerate Signed PDF" to rebuild it.');
+      } else {
+        setError(getError(err));
+      }
     } finally {
       setDownloading(false);
+    }
+  }
+
+  async function regenerateSignedPdf() {
+    try {
+      setRegenerating(true);
+      setError('');
+      setRegenMsg('');
+      await api.post(`/api/documents/${docId}/regenerate`);
+      setRegenMsg('✅ Signed PDF rebuilt! You can now download it.');
+      await loadStatus();
+    } catch (err) {
+      setError('Could not regenerate: ' + getError(err));
+    } finally {
+      setRegenerating(false);
     }
   }
 
@@ -205,14 +227,25 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
 
             {/* Download button appears ONLY when the document is completed */}
             {summary?.document.status === 'completed' ? (
-              <button
-                className="btn success"
-                onClick={downloadSignedPdf}
-                disabled={downloading}
-              >
-                <Download size={16} />{' '}
-                {downloading ? 'Downloading...' : 'Download Completed Signed PDF'}
-              </button>
+              <>
+                <button
+                  className="btn success"
+                  onClick={downloadSignedPdf}
+                  disabled={downloading || regenerating}
+                >
+                  <Download size={16} />{' '}
+                  {downloading ? 'Downloading...' : 'Download Signed PDF'}
+                </button>
+                <button
+                  className="btn secondary sm"
+                  onClick={regenerateSignedPdf}
+                  disabled={regenerating || downloading}
+                  title="If the signed PDF is missing after a server restart, click this to rebuild it"
+                >
+                  <RefreshCw size={14} />{' '}
+                  {regenerating ? 'Rebuilding...' : 'Regenerate Signed PDF'}
+                </button>
+              </>
             ) : (
               <div
                 style={{
@@ -236,6 +269,11 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
 
         {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
         {linkError && <div className="error" role="alert" style={{ marginBottom: 16 }}>{linkError}</div>}
+        {regenMsg && (
+          <div style={{ marginBottom: 16, padding: '10px 16px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 8, color: '#15803d', fontSize: 14 }}>
+            {regenMsg}
+          </div>
+        )}
 
         {loading ? (
           <p className="muted">Loading status details...</p>
