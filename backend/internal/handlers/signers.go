@@ -91,8 +91,8 @@ func (h SignersHandler) Add(w http.ResponseWriter, r *http.Request) {
 		utils.Error(w, 404, "Document not found")
 		return
 	}
-	if docStatus != "draft" {
-		utils.Error(w, 400, "Cannot add signers after the document has been sent")
+	if docStatus == "completed" {
+		utils.Error(w, 400, "Cannot add signers to a completed document")
 		return
 	}
 
@@ -149,10 +149,36 @@ func (h SignersHandler) Add(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Automatically transition document to pending so signing links are instantly live
+	_, _ = h.DB.Exec(r.Context(), `UPDATE documents SET status='pending' WHERE id=$1 AND status='draft'`, docID)
+
+	// Ensure the signer has a signature box ready. If none exists, auto-assign or create default
+	var boxCount int
+	_ = h.DB.QueryRow(r.Context(), `SELECT COUNT(*) FROM signature_boxes WHERE document_id=$1 AND signer_id=$2`, docID, newSigner.ID).Scan(&boxCount)
+	if boxCount == 0 {
+		var unassignedID string
+		err := h.DB.QueryRow(r.Context(), `SELECT id FROM signature_boxes WHERE document_id=$1 AND signer_id IS NULL LIMIT 1`, docID).Scan(&unassignedID)
+		if err == nil && unassignedID != "" {
+			_, _ = h.DB.Exec(r.Context(), `UPDATE signature_boxes SET signer_id=$1 WHERE id=$2`, newSigner.ID, unassignedID)
+		} else {
+			_, _ = h.DB.Exec(r.Context(), `
+				INSERT INTO signature_boxes (document_id, signer_id, page, x, y, width, height, signed)
+				VALUES ($1, $2, 1, 20, 80, 35, 10, false)
+			`, docID, newSigner.ID)
+		}
+	}
+
 	logAudit(r.Context(), h.DB, docID, "SIGNER_ADDED", userLabel(r.Context(), h.DB, userID),
 		fmt.Sprintf("Added signer %s (%s)", in.Name, in.Email), utils.ClientIP(r))
 
-	utils.JSON(w, 201, map[string]any{"message": "Signer added successfully", "signer": newSigner})
+	baseURL := strings.TrimRight(h.FrontendURL, "/")
+	signingURL := fmt.Sprintf("%s/sign/%s", baseURL, newSigner.Token)
+
+	utils.JSON(w, 201, map[string]any{
+		"message":    "Signer added successfully! Signing link is ready to share.",
+		"signer":     newSigner,
+		"signingUrl": signingURL,
+	})
 }
 
 // Remove signer
@@ -168,8 +194,8 @@ func (h SignersHandler) Delete(w http.ResponseWriter, r *http.Request) {
 		utils.Error(w, 404, "Document not found")
 		return
 	}
-	if docStatus != "draft" {
-		utils.Error(w, 400, "Cannot remove signers after the document has been sent")
+	if docStatus == "completed" {
+		utils.Error(w, 400, "Cannot remove signers after the document has been completed")
 		return
 	}
 

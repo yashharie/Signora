@@ -133,15 +133,27 @@ export default function SignersPage({ params }: { params: Promise<{ id: string }
         email: trimmedEmail,
       });
 
-      setSigners((prev) => [...prev, res.data.signer]);
+      const newSigner = res.data.signer;
+      setSigners((prev) => [...prev, newSigner]);
       setName('');
       setEmail('');
-      setSuccess(`Signer ${trimmedName} added successfully!`);
+      setDocStatus('pending');
+
+      const url = res.data.signingUrl || signingLink(newSigner.token);
+      const newLink: SignerLink = {
+        signerId: newSigner.id,
+        name: newSigner.name,
+        email: newSigner.email,
+        token: newSigner.token,
+        signingUrl: url,
+      };
+      setGeneratedLinks([newLink]);
+      setSuccess(`Signer ${trimmedName} added! Their signing link is ready to copy or share below.`);
       const returnBox = new URLSearchParams(window.location.search).get('returnBox');
 
 if (returnBox !== null && /^\d+$/.test(returnBox)) {
   router.push(
-    `/documents/${docId}/prepare?assignBox=${returnBox}&signerId=${res.data.signer.id}`
+    `/documents/${docId}/prepare?assignBox=${returnBox}&signerId=${newSigner.id}`
   );
   return;
 }
@@ -444,7 +456,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
                           </span>
                         </div>
 
-                        {signer.token && docStatus === 'pending' && signer.status === 'pending' && (
+                        {signer.token && signer.status === 'pending' && (
                           <div style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                             <button
                               type="button"

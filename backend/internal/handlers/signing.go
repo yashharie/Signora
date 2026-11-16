@@ -81,15 +81,15 @@ func (h SigningHandler) GetSigningInfo(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if docStatus != "pending" {
-		state := "closed"
-		message := "This document is not currently accepting signatures."
-		if docStatus == "draft" {
-			state = "draft"
-			message = "This document has not been sent for signing yet."
-		}
-		utils.JSON(w, 409, map[string]string{"error": message, "state": state})
+	if docStatus != "pending" && docStatus != "draft" {
+		utils.JSON(w, 409, map[string]string{
+			"error": "This document is not currently accepting signatures.",
+			"state": "closed",
+		})
 		return
+	}
+	if docStatus == "draft" {
+		_, _ = h.DB.Exec(r.Context(), `UPDATE documents SET status='pending' WHERE id=$1 AND status='draft'`, signer.DocumentID)
 	}
 
 	// Fetch boxes assigned to this signer
@@ -125,6 +125,25 @@ func (h SigningHandler) GetSigningInfo(w http.ResponseWriter, r *http.Request) {
 	if err := rows.Err(); err != nil {
 		utils.Error(w, 500, "Could not read signature boxes")
 		return
+	}
+
+	if len(boxes) == 0 {
+		var defaultBox models.SignatureBox
+		signerIDStr := signer.ID
+		err := h.DB.QueryRow(r.Context(), `
+			INSERT INTO signature_boxes (document_id, signer_id, page, x, y, width, height, signed)
+			VALUES ($1, $2, 1, 20, 80, 35, 10, false)
+			RETURNING id, document_id, signer_id, page, x, y, width, height, signed
+		`, signer.DocumentID, signer.ID).Scan(
+			&defaultBox.ID, &defaultBox.DocumentID, &signerIDStr,
+			&defaultBox.Page, &defaultBox.X, &defaultBox.Y, &defaultBox.Width, &defaultBox.Height, &defaultBox.Signed,
+		)
+		if err == nil {
+			defaultBox.SignerID = &signerIDStr
+			defaultBox.SignerName = signer.Name
+			defaultBox.SignerEmail = signer.Email
+			boxes = append(boxes, defaultBox)
+		}
 	}
 	// Audit: record the first time this signer opens the link (not every refresh)
 	performedBy := fmt.Sprintf("%s (%s)", signer.Name, signer.Email)
