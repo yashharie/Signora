@@ -197,7 +197,11 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
         return latest ? { ...signer, token: latest.token } : signer;
       }));
       setGeneratedLinks(links);
-      setSuccess(res.data.message || 'Document sent for signing!');
+      if (res.data.emailsFailed > 0) {
+        setError(res.data.message);
+      } else {
+        setSuccess(res.data.message || 'Document sent for signing!');
+      }
     } catch (err) {
       setError(getError(err));
     } finally {

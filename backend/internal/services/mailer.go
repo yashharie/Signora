@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log"
 	"mime"
 	"net"
 	"net/smtp"
@@ -17,7 +18,7 @@ import (
 	"time"
 )
 
-// Mailer sends email through any SMTP server (Gmail: smtp.gmail.com:587 + App Password).
+// Mailer sends email through any SMTP server (Gmail: smtp.gmail.com:587 / 465 + App Password).
 type Mailer struct {
 	Host, Port, User, Pass string
 }
@@ -28,63 +29,124 @@ type Attachment struct {
 }
 
 func (m *Mailer) Configured() bool {
-	return m != nil && m.User != "" && m.Pass != ""
+	return m != nil && strings.TrimSpace(m.User) != "" && strings.TrimSpace(m.Pass) != ""
 }
 
 // Send delivers one email. Returns an error (never panics) so callers can report per recipient.
 func (m *Mailer) Send(to, subject, htmlBody, textBody string, attachments []Attachment) error {
 	if !m.Configured() {
-		return errors.New("email is not configured: set SMTP_USER and SMTP_PASS in backend/.env")
+		err := errors.New("email is not configured: set SMTP_USER and SMTP_PASS in Railway environment variables")
+		log.Printf("[MAILER ERROR] %v", err)
+		return err
 	}
 	msg, err := buildMessage(m.User, to, subject, htmlBody, textBody, attachments)
 	if err != nil {
+		log.Printf("[MAILER ERROR] Failed to build message for %s: %v", to, err)
 		return err
 	}
-	return m.deliver(to, msg)
+	if err := m.deliver(to, msg); err != nil {
+		log.Printf("[MAILER ERROR] Delivery to %s failed: %v", to, err)
+		return err
+	}
+	log.Printf("[MAILER SUCCESS] Email delivered to %s (subject: %q)", to, subject)
+	return nil
 }
 
 func (m *Mailer) deliver(to string, msg []byte) error {
-	addr := net.JoinHostPort(m.Host, m.Port)
-	conn, err := net.DialTimeout("tcp", addr, 15*time.Second)
-	if err != nil {
-		return fmt.Errorf("cannot reach mail server: %w", err)
+	// Try the configured port first
+	err := m.deliverToPort(to, msg, m.Host, m.Port)
+	if err == nil {
+		return nil
 	}
+
+	log.Printf("[MAILER WARNING] Delivery on port %s failed: %v", m.Port, err)
+
+	// Automatic fallback for Gmail / common SMTP servers between 587 and 465
+	// Cloud providers often restrict port 587 but leave 465 open (or vice versa)
+	fallbackPort := ""
+	if m.Port == "587" {
+		fallbackPort = "465"
+	} else if m.Port == "465" {
+		fallbackPort = "587"
+	}
+
+	if fallbackPort != "" {
+		log.Printf("[MAILER] Attempting automatic fallback to port %s...", fallbackPort)
+		fallbackErr := m.deliverToPort(to, msg, m.Host, fallbackPort)
+		if fallbackErr == nil {
+			log.Printf("[MAILER] Fallback to port %s succeeded!", fallbackPort)
+			return nil
+		}
+		log.Printf("[MAILER WARNING] Fallback to port %s also failed: %v", fallbackPort, fallbackErr)
+		return fmt.Errorf("mail server unreachable (tried ports %s: %v, %s: %v)", m.Port, err, fallbackPort, fallbackErr)
+	}
+
+	return err
+}
+
+func (m *Mailer) deliverToPort(to string, msg []byte, host, port string) error {
+	addr := net.JoinHostPort(host, port)
+	var conn net.Conn
+	var err error
+
+	if port == "465" {
+		// Port 465: Direct TLS connection (SMTPS)
+		tlsDialer := &tls.Dialer{
+			NetDialer: &net.Dialer{Timeout: 15 * time.Second},
+			Config:    &tls.Config{ServerName: host},
+		}
+		conn, err = tlsDialer.Dial("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("tls connection failed on %s: %w", addr, err)
+		}
+	} else {
+		// Port 587 / 25: Plain connection + STARTTLS upgrade
+		conn, err = net.DialTimeout("tcp", addr, 15*time.Second)
+		if err != nil {
+			return fmt.Errorf("connection failed on %s: %w", addr, err)
+		}
+	}
+	defer conn.Close()
+
 	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
-	if m.Port == "465" { // implicit TLS
-		conn = tls.Client(conn, &tls.Config{ServerName: m.Host})
-	}
-	c, err := smtp.NewClient(conn, m.Host)
+
+	c, err := smtp.NewClient(conn, host)
 	if err != nil {
-		conn.Close()
-		return fmt.Errorf("mail server error: %w", err)
+		return fmt.Errorf("smtp handshake error: %w", err)
 	}
 	defer c.Close()
-	if m.Port != "465" {
+
+	if port != "465" {
 		if ok, _ := c.Extension("STARTTLS"); ok {
-			if err := c.StartTLS(&tls.Config{ServerName: m.Host}); err != nil {
-				return fmt.Errorf("TLS error: %w", err)
+			if err := c.StartTLS(&tls.Config{ServerName: host}); err != nil {
+				return fmt.Errorf("STARTTLS error: %w", err)
 			}
 		}
 	}
-	if err := c.Auth(smtp.PlainAuth("", m.User, m.Pass, m.Host)); err != nil {
-		return fmt.Errorf("mail login failed (check SMTP_USER / SMTP_PASS app password): %w", err)
+
+	auth := smtp.PlainAuth("", m.User, m.Pass, host)
+	if err := c.Auth(auth); err != nil {
+		return fmt.Errorf("mail login failed (verify your email and 16-character app password): %w", err)
 	}
+
 	if err := c.Mail(m.User); err != nil {
-		return err
+		return fmt.Errorf("MAIL FROM <%s> rejected: %w", m.User, err)
 	}
 	if err := c.Rcpt(to); err != nil {
-		return fmt.Errorf("recipient rejected: %w", err)
+		return fmt.Errorf("RCPT TO <%s> rejected: %w", to, err)
 	}
+
 	w, err := c.Data()
 	if err != nil {
-		return err
+		return fmt.Errorf("DATA start failed: %w", err)
 	}
 	if _, err := w.Write(msg); err != nil {
-		return err
+		return fmt.Errorf("writing email body failed: %w", err)
 	}
 	if err := w.Close(); err != nil {
-		return err
+		return fmt.Errorf("closing data failed: %w", err)
 	}
+
 	return c.Quit()
 }
 
@@ -160,54 +222,53 @@ func randomHex() string {
 
 // ---------- Email templates (responsive: fluid 600px card, stacked button on phones) ----------
 
-var esc = html.EscapeString
-
 func emailLayout(inner string) string {
-	return `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">` +
-		`<style>@media only screen and (max-width:620px){.wrap{width:100% !important}.pad{padding:22px 18px !important}.btn{display:block !important}}</style>` +
-		`</head><body style="margin:0;padding:16px 8px;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif;">` +
+	return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+		`<title>Signora</title>` +
+		`</head><body style="margin:0;padding:24px;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#0f172a;">` +
 		`<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center">` +
-		`<table role="presentation" class="wrap" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;">` +
-		`<tr><td style="background:#4f46e5;padding:26px;text-align:center;"><div style="color:#ffffff;font-size:24px;font-weight:bold;">Signora</div>` +
-		`<div style="color:#e0e7ff;font-size:13px;margin-top:4px;">Electronic Document Signing</div></td></tr>` +
-		`<tr><td class="pad" style="padding:32px 30px;color:#334155;font-size:15px;line-height:1.6;">` + inner + `</td></tr>` +
+		`<table role="presentation" width="100%" style="max-width:560px;background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;padding:32px;box-shadow:0 1px 3px rgba(0,0,0,0.04);" cellpadding="0" cellspacing="0">` +
+		`<tr><td style="padding-bottom:20px;border-bottom:1px solid #f1f5f9;">` +
+		`<span style="font-weight:700;font-size:20px;letter-spacing:-0.5px;color:#0f172a;">Signora</span>` +
+		`</td></tr>` +
+		inner +
 		`<tr><td style="background:#f8fafc;padding:16px;text-align:center;color:#94a3b8;font-size:12px;">If you did not expect this email you can safely ignore it.</td></tr>` +
 		`</table></td></tr></table></body></html>`
 }
 
-func docBox(title string) string {
-	return `<div style="background:#eef2ff;border-left:4px solid #4f46e5;padding:14px 16px;border-radius:6px;margin:18px 0;font-weight:bold;color:#1e293b;word-break:break-word;">` + esc(title) + `</div>`
-}
-
 func SigningRequestEmail(signerName, senderName, docTitle, link string, expires time.Time, reminder bool) (subject, htmlBody, textBody string) {
-	subject = "Signature requested: " + docTitle
-	intro := "has requested your signature on:"
+	subject = fmt.Sprintf("Please sign: %s", docTitle)
+	greeting := "Please review and sign this document"
 	if reminder {
-		subject = "Reminder: " + subject
-		intro = "is still waiting for your signature on:"
+		subject = fmt.Sprintf("Reminder: please sign %s", docTitle)
+		greeting = "Reminder: this document is still waiting for your signature"
 	}
-	exp := expires.Format("2 January 2006")
-
-	inner := `<p style="margin:0 0 14px;">Hi <strong>` + esc(signerName) + `</strong>,</p>` +
-		`<p style="margin:0 0 6px;"><strong>` + esc(senderName) + `</strong> ` + intro + `</p>` + docBox(docTitle) +
-		`<p style="text-align:center;margin:26px 0;"><a class="btn" href="` + esc(link) + `" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:bold;">Review &amp; Sign</a></p>` +
-		`<p style="font-size:13px;color:#64748b;word-break:break-all;margin:0 0 10px;">If the button does not work, copy this link into your browser:<br>` + esc(link) + `</p>` +
-		`<p style="font-size:13px;color:#dc2626;margin:0;">This link expires on ` + exp + ` and can only be used once.</p>`
-
-	textBody = fmt.Sprintf("Hi %s,\n\n%s %s\n\"%s\"\n\nOpen this link to review and sign:\n%s\n\nThis link expires on %s and can only be used once.\n",
-		signerName, senderName, intro, docTitle, link, exp)
+	inner := fmt.Sprintf(`<tr><td style="padding:24px 0 16px 0;">`+
+		`<h1 style="font-size:18px;margin:0 0 12px 0;color:#0f172a;">%s</h1>`+
+		`<p style="margin:0 0 16px 0;line-height:1.6;color:#334155;">Hello <strong>%s</strong>,<br><br><strong>%s</strong> has sent you <em>%s</em> for your electronic signature.</p>`+
+		`<p style="margin:0 0 24px 0;line-height:1.6;color:#334155;">This link is unique to you and expires on <strong>%s</strong>.</p>`+
+		`<a href="%s" style="display:inline-block;background:#0f172a;color:#ffffff;text-decoration:none;padding:12px 24px;border-radius:8px;font-weight:600;font-size:14px;">Review &amp; Sign Document</a>`+
+		`<p style="margin:24px 0 0 0;font-size:12px;color:#94a3b8;word-break:break-all;">Or copy this link into your browser:<br>%s</p>`+
+		`</td></tr>`,
+		html.EscapeString(greeting), html.EscapeString(signerName), html.EscapeString(senderName),
+		html.EscapeString(docTitle), expires.Format("January 2, 2006 at 3:04 PM MST"), link, link)
+	textBody = fmt.Sprintf("Hello %s,\n\n%s has sent you \"%s\" for signature.\n\nPlease sign before %s:\n%s\n",
+		signerName, senderName, docTitle, expires.Format("Jan 2, 2006 3:04 PM MST"), link)
 	return subject, emailLayout(inner), textBody
 }
 
 func CompletionEmail(recipientName, docTitle string, attached bool) (subject, htmlBody, textBody string) {
-	subject = "Completed: " + docTitle
-	note := "The signed document is ready. Please ask the sender for a copy of the signed PDF."
+	subject = fmt.Sprintf("Completed: %s", docTitle)
+	note := "The fully signed PDF has been archived and is available on Signora."
 	if attached {
 		note = "The fully signed PDF, including a Certificate of Completion and audit trail, is attached to this email."
 	}
-	inner := `<p style="margin:0 0 14px;">Hi <strong>` + esc(recipientName) + `</strong>,</p>` +
-		`<p style="margin:0 0 6px;">Good news! Everyone has signed:</p>` + docBox(docTitle) +
-		`<p style="margin:0;">` + esc(note) + `</p>`
-	textBody = fmt.Sprintf("Hi %s,\n\nEveryone has signed \"%s\".\n\n%s\n", recipientName, docTitle, note)
+	inner := fmt.Sprintf(`<tr><td style="padding:24px 0 16px 0;">`+
+		`<h1 style="font-size:18px;margin:0 0 12px 0;color:#0f172a;">Document Signing Complete</h1>`+
+		`<p style="margin:0 0 16px 0;line-height:1.6;color:#334155;">Hello <strong>%s</strong>,<br><br>All signers have signed <em>%s</em>.</p>`+
+		`<p style="margin:0 0 24px 0;line-height:1.6;color:#334155;">%s</p>`+
+		`</td></tr>`,
+		html.EscapeString(recipientName), html.EscapeString(docTitle), html.EscapeString(note))
+	textBody = fmt.Sprintf("Hello %s,\n\nAll signers have signed \"%s\".\n\n%s\n", recipientName, docTitle, note)
 	return subject, emailLayout(inner), textBody
 }

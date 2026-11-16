@@ -32,7 +32,9 @@ func main() {
 
 	mailer := &services.Mailer{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser, Pass: cfg.SMTPPass}
 	if !mailer.Configured() {
-		log.Println("WARNING: SMTP_USER / SMTP_PASS are not set, so no emails will be sent (signing links are still returned by the API).")
+		log.Println("WARNING: SMTP_USER / SMTP_PASS (or EMAIL / APP_PASSWORD) are not set, so no emails will be sent (signing links are still returned by the API).")
+	} else {
+		log.Printf("SMTP Mailer configured for %s via %s:%s", maskEmail(cfg.SMTPUser), cfg.SMTPHost, cfg.SMTPPort)
 	}
 
 	auth := handlers.AuthHandler{DB: db, Secret: cfg.JWTSecret}
@@ -58,6 +60,65 @@ func main() {
 			"status":   "ok",
 			"database": dbStatus,
 			"service":  "signora-backend",
+			"mailer": map[string]any{
+				"configured": mailer.Configured(),
+				"user":       maskEmail(cfg.SMTPUser),
+				"host":       cfg.SMTPHost,
+				"port":       cfg.SMTPPort,
+			},
+		})
+	})
+
+	// Diagnostic endpoint to test email delivery
+	mux.HandleFunc("GET /api/test-email", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		to := strings.TrimSpace(r.URL.Query().Get("to"))
+		if to == "" {
+			to = cfg.SMTPUser
+		}
+		if to == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"error":   "Recipient email is required (pass ?to=user@example.com) and SMTP_USER is not configured.",
+				"mailer": map[string]any{
+					"configured": mailer.Configured(),
+					"user":       maskEmail(cfg.SMTPUser),
+					"host":       cfg.SMTPHost,
+					"port":       cfg.SMTPPort,
+				},
+			})
+			return
+		}
+
+		err := mailer.Send(to, "Signora SMTP Test", "<p>Your Signora SMTP configuration is working!</p>", "Your Signora SMTP configuration is working!", nil)
+		if err != nil {
+			log.Printf("[TEST-EMAIL ERROR] %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"error":   err.Error(),
+				"to":      to,
+				"mailer": map[string]any{
+					"configured": mailer.Configured(),
+					"user":       maskEmail(cfg.SMTPUser),
+					"host":       cfg.SMTPHost,
+					"port":       cfg.SMTPPort,
+				},
+			})
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"message": "Test email sent successfully to " + to,
+			"mailer": map[string]any{
+				"configured": true,
+				"user":       maskEmail(cfg.SMTPUser),
+				"host":       cfg.SMTPHost,
+				"port":       cfg.SMTPPort,
+			},
 		})
 	})
 
@@ -154,4 +215,19 @@ func loadEnvFile() {
 		}
 		break
 	}
+}
+
+func maskEmail(email string) string {
+	if email == "" {
+		return "[not configured]"
+	}
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return "[configured]"
+	}
+	u := parts[0]
+	if len(u) <= 2 {
+		return u + "***@" + parts[1]
+	}
+	return u[:2] + "***@" + parts[1]
 }
