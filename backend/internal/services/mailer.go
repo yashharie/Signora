@@ -6,21 +6,26 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"log"
 	"mime"
 	"net"
+	"net/http"
 	"net/smtp"
 	"os"
 	"strings"
 	"time"
 )
 
-// Mailer sends email through any SMTP server (Gmail: smtp.gmail.com:587 / 465 + App Password).
+// Mailer sends email through HTTPS APIs (Resend, Brevo) or standard SMTP servers.
 type Mailer struct {
 	Host, Port, User, Pass string
+	ResendKey, ResendFrom  string
+	BrevoKey, BrevoSender  string
 }
 
 type Attachment struct {
@@ -28,17 +33,55 @@ type Attachment struct {
 	Path     string
 }
 
+func (m *Mailer) Provider() string {
+	if m == nil {
+		return "none"
+	}
+	if strings.TrimSpace(m.ResendKey) != "" {
+		return "resend"
+	}
+	if strings.TrimSpace(m.BrevoKey) != "" {
+		return "brevo"
+	}
+	if strings.TrimSpace(m.User) != "" && strings.TrimSpace(m.Pass) != "" {
+		return "smtp"
+	}
+	return "none"
+}
+
 func (m *Mailer) Configured() bool {
-	return m != nil && strings.TrimSpace(m.User) != "" && strings.TrimSpace(m.Pass) != ""
+	return m != nil && m.Provider() != "none"
 }
 
 // Send delivers one email. Returns an error (never panics) so callers can report per recipient.
 func (m *Mailer) Send(to, subject, htmlBody, textBody string, attachments []Attachment) error {
 	if !m.Configured() {
-		err := errors.New("email is not configured: set SMTP_USER and SMTP_PASS in Railway environment variables")
+		err := errors.New("email is not configured: set RESEND_API_KEY, BREVO_API_KEY, or SMTP_USER/SMTP_PASS in Railway environment variables")
 		log.Printf("[MAILER ERROR] %v", err)
 		return err
 	}
+
+	// 1. Resend API (HTTPS port 443 - works everywhere, never blocked on Railway)
+	if strings.TrimSpace(m.ResendKey) != "" {
+		if err := m.sendViaResend(to, subject, htmlBody, textBody, attachments); err != nil {
+			log.Printf("[MAILER RESEND ERROR] Delivery to %s failed: %v", to, err)
+			return err
+		}
+		log.Printf("[MAILER RESEND SUCCESS] Email delivered to %s (subject: %q)", to, subject)
+		return nil
+	}
+
+	// 2. Brevo API (HTTPS port 443 - works everywhere, never blocked on Railway)
+	if strings.TrimSpace(m.BrevoKey) != "" {
+		if err := m.sendViaBrevo(to, subject, htmlBody, textBody, attachments); err != nil {
+			log.Printf("[MAILER BREVO ERROR] Delivery to %s failed: %v", to, err)
+			return err
+		}
+		log.Printf("[MAILER BREVO SUCCESS] Email delivered to %s (subject: %q)", to, subject)
+		return nil
+	}
+
+	// 3. SMTP (ports 587 / 465)
 	msg, err := buildMessage(m.User, to, subject, htmlBody, textBody, attachments)
 	if err != nil {
 		log.Printf("[MAILER ERROR] Failed to build message for %s: %v", to, err)
@@ -49,6 +92,127 @@ func (m *Mailer) Send(to, subject, htmlBody, textBody string, attachments []Atta
 		return err
 	}
 	log.Printf("[MAILER SUCCESS] Email delivered to %s (subject: %q)", to, subject)
+	return nil
+}
+
+func (m *Mailer) sendViaResend(to, subject, htmlBody, textBody string, atts []Attachment) error {
+	from := strings.TrimSpace(m.ResendFrom)
+	if from == "" {
+		from = "Signora <onboarding@resend.dev>"
+	}
+
+	type resendAtt struct {
+		Filename string `json:"filename"`
+		Content  string `json:"content"`
+	}
+	var resendAtts []resendAtt
+	for _, a := range atts {
+		data, err := os.ReadFile(a.Path)
+		if err != nil {
+			return fmt.Errorf("reading attachment %s: %w", a.Filename, err)
+		}
+		resendAtts = append(resendAtts, resendAtt{
+			Filename: a.Filename,
+			Content:  base64.StdEncoding.EncodeToString(data),
+		})
+	}
+
+	payload := map[string]any{
+		"from":    from,
+		"to":      []string{to},
+		"subject": subject,
+		"html":    htmlBody,
+		"text":    textBody,
+	}
+	if len(resendAtts) > 0 {
+		payload["attachments"] = resendAtts
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", "https://api.resend.com/emails", bytes.NewReader(payloadBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(m.ResendKey))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("resend HTTPS request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("resend error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
+	return nil
+}
+
+func (m *Mailer) sendViaBrevo(to, subject, htmlBody, textBody string, atts []Attachment) error {
+	senderEmail := strings.TrimSpace(m.BrevoSender)
+	if senderEmail == "" {
+		senderEmail = strings.TrimSpace(m.User)
+	}
+	if senderEmail == "" {
+		return errors.New("brevo requires a sender email: set BREVO_SENDER or SMTP_USER in Railway Variables")
+	}
+
+	type brevoAtt struct {
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}
+	var brevoAtts []brevoAtt
+	for _, a := range atts {
+		data, err := os.ReadFile(a.Path)
+		if err != nil {
+			return fmt.Errorf("reading attachment %s: %w", a.Filename, err)
+		}
+		brevoAtts = append(brevoAtts, brevoAtt{
+			Name:    a.Filename,
+			Content: base64.StdEncoding.EncodeToString(data),
+		})
+	}
+
+	payload := map[string]any{
+		"sender":      map[string]string{"name": "Signora", "email": senderEmail},
+		"to":          []map[string]string{{"email": to}},
+		"subject":     subject,
+		"htmlContent": htmlBody,
+		"textContent": textBody,
+	}
+	if len(brevoAtts) > 0 {
+		payload["attachment"] = brevoAtts
+	}
+
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", "https://api.brevo.com/v3/smtp/email", bytes.NewReader(payloadBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("api-key", strings.TrimSpace(m.BrevoKey))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("brevo HTTPS request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("brevo error (%d): %s", resp.StatusCode, string(bodyBytes))
+	}
 	return nil
 }
 
@@ -78,7 +242,7 @@ func (m *Mailer) deliver(to string, msg []byte) error {
 			return nil
 		}
 		log.Printf("[MAILER WARNING] Fallback to port %s also failed: %v", fallbackPort, fallbackErr)
-		return fmt.Errorf("mail server unreachable (tried ports %s: %v, %s: %v)", m.Port, err, fallbackPort, fallbackErr)
+		return fmt.Errorf("mail server unreachable (tried ports %s: %v, %s: %v). Note: Railway blocks outbound SMTP ports 587/465 on Free/Hobby plans. To send emails on Railway, set RESEND_API_KEY (from resend.com) or BREVO_API_KEY (from brevo.com) in Railway Variables, or upgrade to Railway Pro.", m.Port, err, fallbackPort, fallbackErr)
 	}
 
 	return err

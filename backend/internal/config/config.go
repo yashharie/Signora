@@ -9,6 +9,8 @@ import (
 type Config struct {
 	Port, DatabaseURL, JWTSecret, FrontendURL, UploadDir, SignedDir string
 	SMTPHost, SMTPPort, SMTPUser, SMTPPass                          string
+	ResendKey, ResendFrom                                           string
+	BrevoKey, BrevoSender                                           string
 }
 
 func Load() Config {
@@ -62,6 +64,14 @@ func Load() Config {
 		frontendURL = "https://" + frontendURL
 	}
 
+	resendKey := getFirst("RESEND_API_KEY", "RESEND_KEY")
+	resendFrom := getFirst("RESEND_FROM", "MAIL_FROM")
+	brevoKey := getFirst("BREVO_API_KEY", "SENDINBLUE_API_KEY")
+	brevoSender := getFirst("BREVO_SENDER", "BREVO_EMAIL")
+	if brevoSender == "" {
+		brevoSender = user
+	}
+
 	return Config{
 		Port:        getFirstDefault("8080", "PORT"),
 		DatabaseURL: getFirstDefault("postgres://postgres:postgres@localhost:5432/signora_db?sslmode=disable", "DATABASE_URL"),
@@ -73,6 +83,10 @@ func Load() Config {
 		SMTPPort:    strings.TrimSpace(port),
 		SMTPUser:    user,
 		SMTPPass:    pass,
+		ResendKey:   resendKey,
+		ResendFrom:  resendFrom,
+		BrevoKey:    brevoKey,
+		BrevoSender: brevoSender,
 	}
 }
 

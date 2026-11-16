@@ -30,11 +30,20 @@ func main() {
 		log.Printf("WARNING: MkdirAll SignedDir: %v", err)
 	}
 
-	mailer := &services.Mailer{Host: cfg.SMTPHost, Port: cfg.SMTPPort, User: cfg.SMTPUser, Pass: cfg.SMTPPass}
+	mailer := &services.Mailer{
+		Host:        cfg.SMTPHost,
+		Port:        cfg.SMTPPort,
+		User:        cfg.SMTPUser,
+		Pass:        cfg.SMTPPass,
+		ResendKey:   cfg.ResendKey,
+		ResendFrom:  cfg.ResendFrom,
+		BrevoKey:    cfg.BrevoKey,
+		BrevoSender: cfg.BrevoSender,
+	}
 	if !mailer.Configured() {
-		log.Println("WARNING: SMTP_USER / SMTP_PASS (or EMAIL / APP_PASSWORD) are not set, so no emails will be sent (signing links are still returned by the API).")
+		log.Println("WARNING: No email provider configured (set RESEND_API_KEY, BREVO_API_KEY, or SMTP_USER/SMTP_PASS in Railway Variables).")
 	} else {
-		log.Printf("SMTP Mailer configured for %s via %s:%s", maskEmail(cfg.SMTPUser), cfg.SMTPHost, cfg.SMTPPort)
+		log.Printf("Mailer configured with provider: %s", mailer.Provider())
 	}
 
 	auth := handlers.AuthHandler{DB: db, Secret: cfg.JWTSecret}
@@ -62,6 +71,7 @@ func main() {
 			"service":  "signora-backend",
 			"mailer": map[string]any{
 				"configured": mailer.Configured(),
+				"provider":   mailer.Provider(),
 				"user":       maskEmail(cfg.SMTPUser),
 				"host":       cfg.SMTPHost,
 				"port":       cfg.SMTPPort,
@@ -83,6 +93,7 @@ func main() {
 				"error":   "Recipient email is required (pass ?to=user@example.com) and SMTP_USER is not configured.",
 				"mailer": map[string]any{
 					"configured": mailer.Configured(),
+					"provider":   mailer.Provider(),
 					"user":       maskEmail(cfg.SMTPUser),
 					"host":       cfg.SMTPHost,
 					"port":       cfg.SMTPPort,
@@ -91,7 +102,7 @@ func main() {
 			return
 		}
 
-		err := mailer.Send(to, "Signora SMTP Test", "<p>Your Signora SMTP configuration is working!</p>", "Your Signora SMTP configuration is working!", nil)
+		err := mailer.Send(to, "Signora Email Test", "<p>Your Signora email service is configured and working!</p>", "Your Signora email service is configured and working!", nil)
 		if err != nil {
 			log.Printf("[TEST-EMAIL ERROR] %v", err)
 			w.WriteHeader(http.StatusInternalServerError)
@@ -101,6 +112,7 @@ func main() {
 				"to":      to,
 				"mailer": map[string]any{
 					"configured": mailer.Configured(),
+					"provider":   mailer.Provider(),
 					"user":       maskEmail(cfg.SMTPUser),
 					"host":       cfg.SMTPHost,
 					"port":       cfg.SMTPPort,
@@ -115,6 +127,7 @@ func main() {
 			"message": "Test email sent successfully to " + to,
 			"mailer": map[string]any{
 				"configured": true,
+				"provider":   mailer.Provider(),
 				"user":       maskEmail(cfg.SMTPUser),
 				"host":       cfg.SMTPHost,
 				"port":       cfg.SMTPPort,
