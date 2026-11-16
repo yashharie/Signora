@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -216,13 +217,14 @@ func (h SigningHandler) GetSigningInfo(w http.ResponseWriter, r *http.Request) {
 func (h SigningHandler) ServeSigningPDF(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	var storedName string
+	var docID string
 	err := h.DB.QueryRow(r.Context(), `
-		SELECT d.stored_name
+		SELECT d.id, d.stored_name
 		FROM signers s
 		JOIN documents d ON s.document_id = d.id
 		WHERE s.token = $1 AND s.status = 'pending'
 		  AND s.token_expires_at > NOW() AND d.status = 'pending'
-	`, token).Scan(&storedName)
+	`, token).Scan(&docID, &storedName)
 	if err == pgx.ErrNoRows {
 		utils.Error(w, 404, "Document not found")
 		return
@@ -233,6 +235,17 @@ func (h SigningHandler) ServeSigningPDF(w http.ResponseWriter, r *http.Request) 
 	}
 
 	path := filepath.Join(h.UploadDir, filepath.Base(storedName))
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		var dbBytes []byte
+		_ = h.DB.QueryRow(r.Context(), `SELECT file_data FROM documents WHERE id=$1`, docID).Scan(&dbBytes)
+		if len(dbBytes) > 0 {
+			_ = os.WriteFile(path, dbBytes, 0644)
+			w.Header().Set("Content-Type", "application/pdf")
+			w.Header().Set("Content-Disposition", "inline")
+			w.Write(dbBytes)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/pdf")
 	w.Header().Set("Content-Disposition", "inline")
 	http.ServeFile(w, r, path)

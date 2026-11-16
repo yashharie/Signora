@@ -61,9 +61,18 @@ func GenerateSignedPDF(ctx context.Context, db *pgxpool.Pool, uploadDir, signedD
 	origBytes, err := os.ReadFile(origPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("the original uploaded PDF was lost during a previous server redeploy. Please upload a fresh copy of the document")
+			var dbBytes []byte
+			_ = db.QueryRow(ctx, `SELECT file_data FROM documents WHERE id=$1`, documentID).Scan(&dbBytes)
+			if len(dbBytes) > 0 {
+				_ = os.MkdirAll(uploadDir, 0755)
+				_ = os.WriteFile(origPath, dbBytes, 0644)
+				origBytes = dbBytes
+			} else {
+				return fmt.Errorf("the original uploaded PDF was lost during a previous server redeploy. Please upload a fresh copy of the document")
+			}
+		} else {
+			return fmt.Errorf("cannot read original PDF: %w", err)
 		}
-		return fmt.Errorf("cannot read original PDF: %w", err)
 	}
 	origSum := sha256.Sum256(origBytes)
 	origHash := hex.EncodeToString(origSum[:])
@@ -235,8 +244,8 @@ func GenerateSignedPDF(ctx context.Context, db *pgxpool.Pool, uploadDir, signedD
 	}
 	_ = os.Chmod(outPath, 0644)
 
-	// Mark completed. Only the first caller changes the status, so the audit row is written once.
-	tag, err := db.Exec(ctx, `UPDATE documents SET signed_file_name = $1, status = 'completed' WHERE id = $2 AND status <> 'completed'`, signedName, documentID)
+	// Mark completed and persist signed PDF bytes in database so it survives all restarts.
+	tag, err := db.Exec(ctx, `UPDATE documents SET signed_file_name = $1, signed_file_data = $2, status = 'completed' WHERE id = $3 AND status <> 'completed'`, signedName, signedBytes, documentID)
 	if err != nil {
 		return fmt.Errorf("could not update document: %w", err)
 	}
@@ -244,7 +253,7 @@ func GenerateSignedPDF(ctx context.Context, db *pgxpool.Pool, uploadDir, signedD
 		LogAudit(ctx, db, documentID, "DOCUMENT_COMPLETED", "System",
 			"All signers signed. Signed PDF generated. SHA-256: "+signedHash, "")
 	} else {
-		_, _ = db.Exec(ctx, `UPDATE documents SET signed_file_name = $1 WHERE id = $2`, signedName, documentID)
+		_, _ = db.Exec(ctx, `UPDATE documents SET signed_file_name = $1, signed_file_data = $2 WHERE id = $3`, signedName, signedBytes, documentID)
 	}
 	return nil
 }

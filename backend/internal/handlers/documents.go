@@ -47,16 +47,17 @@ func (h DocumentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		utils.Error(w, 400, "Only PDF files are accepted")
 		return
 	}
-	head := make([]byte, 512)
-	n, _ := file.Read(head)
-	if n < 5 || string(head[:5]) != "%PDF-" {
-		utils.Error(w, 400, "Uploaded file is not a valid PDF")
-		return
-	}
-	if _, err = file.Seek(0, io.SeekStart); err != nil {
+	fileBytes, err := io.ReadAll(file)
+	if err != nil {
 		utils.Error(w, 500, "Could not read PDF")
 		return
 	}
+	size := int64(len(fileBytes))
+	if size < 5 || string(fileBytes[:5]) != "%PDF-" {
+		utils.Error(w, 400, "Uploaded file is not a valid PDF")
+		return
+	}
+
 	if err = os.MkdirAll(h.UploadDir, 0755); err != nil {
 		utils.Error(w, 500, "Storage is unavailable")
 		return
@@ -64,20 +65,17 @@ func (h DocumentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	id := uuid.NewString()
 	stored := id + ".pdf"
 	dest := filepath.Join(h.UploadDir, stored)
-	out, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
-	if err != nil {
+	if err := os.WriteFile(dest, fileBytes, 0644); err != nil {
 		utils.Error(w, 500, "Could not save PDF")
 		return
 	}
-	size, copyErr := io.Copy(out, file)
-	closeErr := out.Close()
-	if copyErr != nil || closeErr != nil {
-		_ = os.Remove(dest)
-		utils.Error(w, 500, "Could not save PDF")
-		return
-	}
+
 	var docID string
-	err = h.DB.QueryRow(r.Context(), `INSERT INTO documents(id,user_id,title,original_name,stored_name,file_size,status) VALUES($1,$2,$3,$4,$5,$6,'draft') RETURNING id`, id, userID, title, filepath.Base(header.Filename), stored, size).Scan(&docID)
+	err = h.DB.QueryRow(r.Context(), `
+		INSERT INTO documents(id, user_id, title, original_name, stored_name, file_size, status, file_data)
+		VALUES($1, $2, $3, $4, $5, $6, 'draft', $7)
+		RETURNING id
+	`, id, userID, title, filepath.Base(header.Filename), stored, size, fileBytes).Scan(&docID)
 	if err != nil {
 		_ = os.Remove(dest)
 		utils.Error(w, 500, "Could not save document details")
@@ -124,6 +122,21 @@ func (h DocumentHandler) serveFile(w http.ResponseWriter, r *http.Request, downl
 		return
 	}
 	path := filepath.Join(h.UploadDir, filepath.Base(stored))
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		var dbBytes []byte
+		_ = h.DB.QueryRow(r.Context(), `SELECT file_data FROM documents WHERE id=$1`, id).Scan(&dbBytes)
+		if len(dbBytes) > 0 {
+			_ = os.WriteFile(path, dbBytes, 0644)
+			w.Header().Set("Content-Type", "application/pdf")
+			if download {
+				w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, strings.ReplaceAll(name, "\"", "")))
+			} else {
+				w.Header().Set("Content-Disposition", "inline")
+			}
+			w.Write(dbBytes)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/pdf")
 	if download {
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, strings.ReplaceAll(name, "\"", "")))

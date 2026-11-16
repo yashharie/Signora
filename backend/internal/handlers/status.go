@@ -216,17 +216,24 @@ func (h StatusHandler) DownloadSigned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If document is not marked completed or file is missing from disk, generate it automatically on the fly
+	// If document is not marked completed or file is missing from disk, check database or generate on the fly
 	needGenerate := status != "completed" || signedName == nil || *signedName == ""
 	var filePath string
 	if !needGenerate {
 		filePath = filepath.Join(h.SignedDir, filepath.Base(*signedName))
 		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			legacy := filepath.Join(h.UploadDir, filepath.Base(*signedName))
-			if _, err2 := os.Stat(legacy); err2 == nil {
-				filePath = legacy
+			var dbSigned []byte
+			_ = h.DB.QueryRow(r.Context(), `SELECT signed_file_data FROM documents WHERE id = $1`, docID).Scan(&dbSigned)
+			if len(dbSigned) > 0 {
+				_ = os.MkdirAll(h.SignedDir, 0755)
+				_ = os.WriteFile(filePath, dbSigned, 0644)
 			} else {
-				needGenerate = true
+				legacy := filepath.Join(h.UploadDir, filepath.Base(*signedName))
+				if _, err2 := os.Stat(legacy); err2 == nil {
+					filePath = legacy
+				} else {
+					needGenerate = true
+				}
 			}
 		}
 	}
