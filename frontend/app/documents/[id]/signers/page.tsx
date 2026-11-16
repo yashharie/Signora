@@ -296,10 +296,10 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
           </div>
           <div className="actions">
             <button
-              className="btn secondary"
+              className="btn"
               onClick={() => router.push(`/documents/${docId}/prepare`)}
             >
-              <ArrowLeft size={16} /> Edit Boxes
+              Next: Place Boxes on PDF <ArrowRight size={16} />
             </button>
             <button
               className="btn success"
@@ -309,10 +309,10 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
               <Send size={16} /> {sending ? 'Creating Links...' : 'Generate & Share Signing Links'}
             </button>
             <button
-              className="btn secondary"
+              className="btn secondary sm"
               onClick={() => router.push(`/documents/${docId}/status`)}
             >
-              Status Page <ArrowRight size={16} />
+              Status Page <ArrowRight size={14} />
             </button>
           </div>
         </div>
@@ -345,7 +345,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
               className="btn sm secondary"
               onClick={() => router.push(`/documents/${docId}/prepare`)}
             >
-              Assign in Step 1
+              Assign in Step 2
             </button>
           </div>
         )}

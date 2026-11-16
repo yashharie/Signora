@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState, useRef, use, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { Plus, Trash2, Save, ArrowRight, UserCheck } from 'lucide-react';
+import { Plus, Trash2, Save, ArrowRight, ArrowLeft, UserCheck } from 'lucide-react';
 import Nav from '@/components/Nav';
 import WorkflowStepper from '@/components/WorkflowStepper';
 import PdfViewer from '@/components/PdfViewer';
@@ -316,6 +316,12 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
             </p>
           </div>
           <div className="actions">
+            <button
+              className="btn secondary sm"
+              onClick={() => router.push(`/documents/${docId}/signers`)}
+            >
+              <ArrowLeft size={16} /> Back: Signers
+            </button>
             <button className="btn secondary" onClick={addBox} disabled={loading || !pdfPagesLoaded}>
               <Plus size={16} /> Add Signature Box
             </button>
@@ -324,9 +330,12 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
             </button>
             <button
               className="btn success"
-              onClick={() => router.push(`/documents/${docId}/signers`)}
+              onClick={async () => {
+                await saveBoxes();
+                router.push(`/documents/${docId}/status`);
+              }}
             >
-              Next: Signers <ArrowRight size={16} />
+              Save & View Status <ArrowRight size={16} />
             </button>
           </div>
         </div>
