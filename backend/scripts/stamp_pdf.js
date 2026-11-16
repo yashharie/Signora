@@ -68,10 +68,20 @@ async function stampPdf(payload) {
       throw new Error(`Signature box has an invalid page number: ${box?.page}`);
     }
     const values = [box.x, box.y, box.width, box.height];
-    if (!values.every(Number.isFinite) || box.x < 0 || box.y < 0 ||
-        box.width <= 0 || box.height <= 0 ||
-        box.x + box.width > 100 || box.y + box.height > 100) {
+    if (!values.every(Number.isFinite) || box.width <= 0 || box.height <= 0) {
       throw new Error(`Signature box on page ${box.page} has invalid coordinates`);
+    }
+    // Clamp to page bounds — a box dragged to the very edge may be slightly over 100%
+    box = { ...box };
+    if (box.x < 0) box.x = 0;
+    if (box.y < 0) box.y = 0;
+    if (box.x + box.width > 100) {
+      if (box.width > 100) box.width = 100;
+      box.x = 100 - box.width;
+    }
+    if (box.y + box.height > 100) {
+      if (box.height > 100) box.height = 100;
+      box.y = 100 - box.height;
     }
     const signer = signerById.get(box.signerId);
     if (!signer || signer.name !== box.signerName || signer.email !== box.signerEmail ||

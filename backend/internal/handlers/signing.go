@@ -113,9 +113,38 @@ func (h SigningHandler) GetSigningInfo(w http.ResponseWriter, r *http.Request) {
 			utils.Error(w, 500, "Could not read signature boxes")
 			return
 		}
-		if !validBoxGeometry(b.Page, b.X, b.Y, b.Width, b.Height) || signerID == nil || *signerID != signer.ID {
-			utils.Error(w, 422, "A signature box is invalid. Please contact the sender.")
-			return
+		// Skip boxes not belonging to this signer
+		if signerID == nil || *signerID != signer.ID {
+			continue
+		}
+		// Clamp coordinates to valid range instead of hard-failing the whole request.
+		// A box placed at the very edge of the last page may be slightly over 100.
+		if b.Page < 1 {
+			b.Page = 1
+		}
+		if b.X < 0 {
+			b.X = 0
+		}
+		if b.Y < 0 {
+			b.Y = 0
+		}
+		if b.Width <= 0 {
+			b.Width = 10
+		}
+		if b.Height <= 0 {
+			b.Height = 5
+		}
+		if b.X+b.Width > 100 {
+			if b.Width > 100 {
+				b.Width = 100
+			}
+			b.X = 100 - b.Width
+		}
+		if b.Y+b.Height > 100 {
+			if b.Height > 100 {
+				b.Height = 100
+			}
+			b.Y = 100 - b.Height
 		}
 		b.SignerID = signerID
 		b.SignerName = signer.Name

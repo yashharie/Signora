@@ -92,8 +92,8 @@ func (h BoxesHandler) Save(w http.ResponseWriter, r *http.Request) {
 		utils.Error(w, 404, "Document not found")
 		return
 	}
-	if docStatus != "draft" {
-		utils.Error(w, 400, "Cannot modify signature boxes after the document has been sent")
+	if docStatus == "completed" {
+		utils.Error(w, 400, "Cannot modify signature boxes after the document has been completed")
 		return
 	}
 

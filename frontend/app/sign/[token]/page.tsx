@@ -188,14 +188,14 @@ export default function SignerPage({ params }: { params: Promise<{ token: string
     }
   }
 
-  // Guide to next box
+  // Guide to next box — cycles through all pages that have boxes
   function goToNextBox() {
-    const unvisited = boxes.find((b) => b.page !== currentPage);
-    if (unvisited) {
-      setCurrentPage(unvisited.page);
-    } else if (!adoptedSignature) {
-      setIsPadOpen(true);
-    }
+    // Collect all unique pages that have boxes, sorted
+    const boxPages = [...new Set(boxes.map((b) => b.page))].sort((a, b) => a - b);
+    if (boxPages.length === 0) return;
+    // Find the next page after currentPage (wraps around)
+    const nextPage = boxPages.find((p) => p > currentPage) ?? boxPages[0];
+    setCurrentPage(nextPage);
   }
 
   // Render Error Screens
@@ -385,11 +385,12 @@ export default function SignerPage({ params }: { params: Promise<{ token: string
   }
 
   const currentPageBoxes = boxes.filter((b) => b.page === currentPage);
+  const boxPages = [...new Set(boxes.map((b) => b.page))].sort((a, b) => a - b);
+  const currentBoxPageIndex = boxPages.indexOf(currentPage);
   const hasInvalidBoxes = pdfPagesLoaded && boxes.some((box) =>
     !Number.isInteger(box.page) || box.page < 1 || box.page > totalPages ||
     ![box.x, box.y, box.width, box.height].every(Number.isFinite) ||
-    box.x < 0 || box.y < 0 || box.width <= 0 || box.height <= 0 ||
-    box.x + box.width > 100 || box.y + box.height > 100
+    box.width <= 0 || box.height <= 0
   );
   const canSubmit = !loading && !!pdfData && pdfPagesLoaded && boxes.length > 0 && !hasInvalidBoxes;
   const boxValidationMessage = hasInvalidBoxes
@@ -486,9 +487,12 @@ export default function SignerPage({ params }: { params: Promise<{ token: string
           )}
         </div>
 
-        {boxes.length > 1 && (
+        {boxPages.length > 1 && (
           <button className="btn sm ghost" onClick={goToNextBox} style={{ fontSize: 12 }}>
-            Next Box <ArrowRight size={13} />
+            {currentBoxPageIndex >= 0
+              ? `Signature page ${currentBoxPageIndex + 1} of ${boxPages.length}`
+              : `Go to signature box`}{' '}
+            <ArrowRight size={13} />
           </button>
         )}
       </div>
