@@ -108,9 +108,10 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
       a.click();
       document.body.removeChild(a);
       setTimeout(() => URL.revokeObjectURL(url), 60000);
+      await loadStatus();
     } catch (err: any) {
       if (err?.response?.status === 404) {
-        setError('Signed PDF is missing on the server (server was redeployed). Click "Regenerate Signed PDF" to rebuild it.');
+        setError('Signed PDF is missing on the server. Click "Regenerate Signed PDF" to rebuild it.');
       } else {
         setError(getError(err));
       }
@@ -225,8 +226,8 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
               <RefreshCw size={14} /> Refresh
             </button>
 
-            {/* Download button appears ONLY when the document is completed */}
-            {summary?.document.status === 'completed' ? (
+            {/* Download button appears when document is completed OR all signers have signed */}
+            {summary?.document.status === 'completed' || (summary && summary.totalSigners > 0 && summary.signedCount === summary.totalSigners) ? (
               <>
                 <button
                   className="btn success"
@@ -240,10 +241,10 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
                   className="btn secondary sm"
                   onClick={regenerateSignedPdf}
                   disabled={regenerating || downloading}
-                  title="If the signed PDF is missing after a server restart, click this to rebuild it"
+                  title="Click to regenerate and rebuild the signed PDF"
                 >
                   <RefreshCw size={14} />{' '}
-                  {regenerating ? 'Rebuilding...' : 'Regenerate Signed PDF'}
+                  {regenerating ? 'Rebuilding...' : 'Regenerate'}
                 </button>
               </>
             ) : (
@@ -266,6 +267,44 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
         </div>
 
         <WorkflowStepper docId={docId} currentStep="status" />
+
+        {/* Ready to Download Banner */}
+        {(summary?.document.status === 'completed' || (summary && summary.totalSigners > 0 && summary.signedCount === summary.totalSigners)) && (
+          <div
+            style={{
+              margin: '0 0 20px 0',
+              padding: '16px 20px',
+              background: '#ecfdf5',
+              border: '1px solid #a7f3d0',
+              borderRadius: 12,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: 12,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <CheckCircle2 size={28} color="#059669" />
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 16, color: '#065f46' }}>
+                  Document Signed & Ready!
+                </div>
+                <div style={{ fontSize: 13, color: '#047857' }}>
+                  All signatures have been recorded. Click to download your complete signed PDF with audit trail certificate.
+                </div>
+              </div>
+            </div>
+            <button
+              className="btn success"
+              onClick={downloadSignedPdf}
+              disabled={downloading || regenerating}
+              style={{ padding: '10px 20px', fontSize: 14, fontWeight: 700 }}
+            >
+              <Download size={17} /> {downloading ? 'Generating & Downloading...' : 'Download Signed PDF'}
+            </button>
+          </div>
+        )}
 
         {error && <div className="error" style={{ marginBottom: 16 }}>{error}</div>}
         {linkError && <div className="error" role="alert" style={{ marginBottom: 16 }}>{linkError}</div>}

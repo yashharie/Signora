@@ -187,20 +187,48 @@ func (h StatusHandler) DownloadSigned(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if status != "completed" || signedName == nil || *signedName == "" {
+	// Check if all signers have completed signing
+	var totalSigners, pendingSigners int
+	err = h.DB.QueryRow(r.Context(), `
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE status <> 'signed')
+		FROM signers WHERE document_id = $1
+	`, docID).Scan(&totalSigners, &pendingSigners)
+	if err != nil {
+		utils.Error(w, 500, "Could not verify signer progress")
+		return
+	}
+
+	if totalSigners == 0 || pendingSigners > 0 {
 		utils.Error(w, 400, "Signed PDF is only available after all signers have signed the document.")
 		return
 	}
 
-	// Never fall back to the unsigned original: the user must get the signed file or an error.
-	filePath := filepath.Join(h.SignedDir, filepath.Base(*signedName))
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		legacy := filepath.Join(h.UploadDir, filepath.Base(*signedName)) // older documents
-		if _, err2 := os.Stat(legacy); err2 != nil {
-			utils.Error(w, 404, "Signed PDF file is missing on the server. Use \"Regenerate signed PDF\" to rebuild it.")
+	// If document is not marked completed or file is missing from disk, generate it automatically on the fly
+	needGenerate := status != "completed" || signedName == nil || *signedName == ""
+	var filePath string
+	if !needGenerate {
+		filePath = filepath.Join(h.SignedDir, filepath.Base(*signedName))
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			legacy := filepath.Join(h.UploadDir, filepath.Base(*signedName))
+			if _, err2 := os.Stat(legacy); err2 == nil {
+				filePath = legacy
+			} else {
+				needGenerate = true
+			}
+		}
+	}
+
+	if needGenerate {
+		if err := services.CompleteDocument(r.Context(), h.DB, h.Mailer, h.UploadDir, h.SignedDir, docID); err != nil {
+			utils.Error(w, 500, "Could not generate signed PDF: "+err.Error())
 			return
 		}
-		filePath = legacy
+		_ = h.DB.QueryRow(r.Context(), `SELECT signed_file_name FROM documents WHERE id = $1`, docID).Scan(&signedName)
+		if signedName == nil || *signedName == "" {
+			utils.Error(w, 500, "Failed to retrieve generated signed PDF")
+			return
+		}
+		filePath = filepath.Join(h.SignedDir, filepath.Base(*signedName))
 	}
 
 	baseName := strings.TrimSuffix(originalName, filepath.Ext(originalName))
