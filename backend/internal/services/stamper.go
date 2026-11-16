@@ -60,6 +60,9 @@ func GenerateSignedPDF(ctx context.Context, db *pgxpool.Pool, uploadDir, signedD
 	origPath := filepath.Join(uploadDir, filepath.Base(storedName))
 	origBytes, err := os.ReadFile(origPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("the original uploaded PDF was lost during a previous server redeploy. Please upload a fresh copy of the document")
+		}
 		return fmt.Errorf("cannot read original PDF: %w", err)
 	}
 	origSum := sha256.Sum256(origBytes)

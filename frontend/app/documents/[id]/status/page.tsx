@@ -110,8 +110,14 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
       setTimeout(() => URL.revokeObjectURL(url), 60000);
       await loadStatus();
     } catch (err: any) {
-      if (err?.response?.status === 404) {
-        setError('Signed PDF is missing on the server. Click "Regenerate Signed PDF" to rebuild it.');
+      if (err?.response?.data instanceof Blob) {
+        try {
+          const text = await err.response.data.text();
+          const json = JSON.parse(text);
+          setError(json.error || text || 'Could not download signed PDF');
+        } catch {
+          setError(getError(err));
+        }
       } else {
         setError(getError(err));
       }

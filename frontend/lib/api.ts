@@ -9,6 +9,11 @@ api.interceptors.request.use((config) => {
   return config;
 });
 export function getError(error: unknown): string {
-  if (axios.isAxiosError(error)) return error.response?.data?.error || 'Something went wrong';
+  if (axios.isAxiosError(error)) {
+    if (typeof error.response?.data?.error === 'string') return error.response.data.error;
+    if (typeof error.response?.data === 'string') return error.response.data;
+    if (error.message) return error.message;
+  }
+  if (error instanceof Error) return error.message;
   return 'Something went wrong';
 }
