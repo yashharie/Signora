@@ -209,8 +209,12 @@ func GenerateSignedPDF(ctx context.Context, db *pgxpool.Pool, uploadDir, signedD
 	defer cancel()
 	output, err := exec.CommandContext(runCtx, "node", findStampScript(), tmpPayloadPath).CombinedOutput()
 	if err != nil {
-		log.Printf("stamp_pdf error: %v (output: %s)", err, string(output))
-		return fmt.Errorf("PDF stamper failed (is Node.js installed and `npm install` run in backend/?): %v", err)
+		outStr := strings.TrimSpace(string(output))
+		log.Printf("stamp_pdf error: %v (output: %s)", err, outStr)
+		if outStr == "" {
+			outStr = err.Error()
+		}
+		return fmt.Errorf("PDF stamper failed: %s", outStr)
 	}
 
 	signedBytes, err := os.ReadFile(tmpOutPath)

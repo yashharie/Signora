@@ -63,16 +63,16 @@ async function stampPdf(payload) {
   // ---------- 1. Stamp signatures ----------
   const imageCache = new Map(); // one signer = one image, reused for all of their boxes
   const signersWithBoxes = new Set();
-  for (const box of boxes) {
-    if (!box || !Number.isInteger(box.page) || box.page < 1 || box.page > pages.length) {
-      throw new Error(`Signature box has an invalid page number: ${box?.page}`);
+  for (const rawBox of boxes) {
+    if (!rawBox || !Number.isInteger(rawBox.page) || rawBox.page < 1 || rawBox.page > pages.length) {
+      throw new Error(`Signature box has an invalid page number: ${rawBox?.page}`);
     }
-    const values = [box.x, box.y, box.width, box.height];
-    if (!values.every(Number.isFinite) || box.width <= 0 || box.height <= 0) {
-      throw new Error(`Signature box on page ${box.page} has invalid coordinates`);
+    const values = [rawBox.x, rawBox.y, rawBox.width, rawBox.height];
+    if (!values.every(Number.isFinite) || rawBox.width <= 0 || rawBox.height <= 0) {
+      throw new Error(`Signature box on page ${rawBox.page} has invalid coordinates`);
     }
     // Clamp to page bounds — a box dragged to the very edge may be slightly over 100%
-    box = { ...box };
+    const box = { ...rawBox };
     if (box.x < 0) box.x = 0;
     if (box.y < 0) box.y = 0;
     if (box.x + box.width > 100) {
