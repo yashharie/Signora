@@ -150,6 +150,19 @@ func (h StatusHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		progress = (signedCount * 100) / totalSigners
 	}
 
+	// Self-heal: If all signers completed signing but document is still pending (e.g. from a prior transient stamper failure),
+	// automatically finalize the document and generate the signed PDF now.
+	if totalSigners > 0 && signedCount == totalSigners && doc.Status != "completed" {
+		if err := services.CompleteDocument(r.Context(), h.DB, h.Mailer, h.UploadDir, h.SignedDir, docID); err != nil {
+			// Log error but continue so the user still sees current progress and logs
+			_ = err
+		} else {
+			doc.Status = "completed"
+			_ = h.DB.QueryRow(r.Context(), `SELECT signed_file_name FROM documents WHERE id = $1`, docID).Scan(&signedFileName)
+			doc.SignedFileName = signedFileName
+		}
+	}
+
 	hasSignedPdf := doc.Status == "completed" && doc.SignedFileName != nil && *doc.SignedFileName != ""
 
 	summary := models.DocumentStatusSummary{
