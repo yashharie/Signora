@@ -355,6 +355,24 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
                               )}
                               {copiedToken === signer.id ? 'Link Copied' : 'Copy Signing Link'}
                             </button>
+                            <a
+                              href={`https://api.whatsapp.com/send?text=${encodeURIComponent(`Hello ${signer.name}, please review and sign this document: ${signingLink(signer.token)}`)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="btn sm"
+                              style={{
+                                background: '#16a34a',
+                                color: '#fff',
+                                textDecoration: 'none',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 4,
+                                fontSize: 12,
+                                padding: '6px 10px',
+                              }}
+                            >
+                              WhatsApp
+                            </a>
                             <button
                               type="button"
                               onClick={() => openSignerLink(signer.id)}

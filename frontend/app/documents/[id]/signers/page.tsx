@@ -197,11 +197,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
         return latest ? { ...signer, token: latest.token } : signer;
       }));
       setGeneratedLinks(links);
-      if (res.data.emailsFailed > 0) {
-        setError(res.data.message);
-      } else {
-        setSuccess(res.data.message || 'Document sent for signing!');
-      }
+      setSuccess('Signing links generated successfully! You can copy the link or share via WhatsApp below.');
     } catch (err) {
       setError(getError(err));
     } finally {
@@ -298,7 +294,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
               onClick={handleSendForSigning}
               disabled={sending || signers.length === 0}
             >
-              <Send size={16} /> {sending ? 'Sending...' : 'Send for Signing'}
+              <Send size={16} /> {sending ? 'Creating Links...' : 'Generate & Share Signing Links'}
             </button>
             <button
               className="btn secondary"
@@ -447,6 +443,45 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
                             {signer.status}
                           </span>
                         </div>
+
+                        {signer.token && docStatus === 'pending' && signer.status === 'pending' && (
+                          <div style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                            <button
+                              type="button"
+                              className="btn sm secondary"
+                              onClick={() => copyToClipboard(signer.id, -1)}
+                              style={{ fontSize: 11, padding: '3px 8px' }}
+                            >
+                              <Copy size={12} /> Copy Link
+                            </button>
+                            <a
+                              href={`https://api.whatsapp.com/send?text=${encodeURIComponent(`Hello ${signer.name}, please review and sign this document: ${signingLink(signer.token)}`)}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="btn sm"
+                              style={{
+                                background: '#16a34a',
+                                color: '#fff',
+                                textDecoration: 'none',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 3,
+                                fontSize: 11,
+                                padding: '3px 8px',
+                              }}
+                            >
+                              WhatsApp
+                            </a>
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              onClick={() => openSigningLink(signer.id)}
+                              style={{ fontSize: 11, padding: '3px 8px' }}
+                            >
+                              Sign Now <ArrowRight size={11} />
+                            </button>
+                          </div>
+                        )}
                       </div>
 
                       <button
@@ -515,6 +550,24 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
                         {copiedIndex === idx ? <Check size={14} color="#16a34a" /> : <Copy size={14} />}
                         {copiedIndex === idx ? 'Copied' : 'Copy'}
                       </button>
+                      <a
+                        href={`https://api.whatsapp.com/send?text=${encodeURIComponent(`Hello ${link.name}, please review and sign this document: ${link.signingUrl}`)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn sm"
+                        style={{
+                          background: '#16a34a',
+                          color: '#fff',
+                          textDecoration: 'none',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 4,
+                          fontSize: 12,
+                          padding: '6px 10px',
+                        }}
+                      >
+                        WhatsApp
+                      </a>
                       <button
                         type="button"
                         className="btn sm ghost"
