@@ -76,3 +76,11 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS signed_file_name TEXT;
 ALTER TABLE signers   ADD COLUMN IF NOT EXISTS email_sent BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE signers   ADD COLUMN IF NOT EXISTS email_sent_at TIMESTAMPTZ;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS completion_emailed_at TIMESTAMPTZ;
+
+-- One active reset per account; only the SHA-256 digest is persisted.
+CREATE TABLE IF NOT EXISTS password_resets (
+ user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ token_hash TEXT NOT NULL UNIQUE,
+ expires_at TIMESTAMPTZ NOT NULL,
+ requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

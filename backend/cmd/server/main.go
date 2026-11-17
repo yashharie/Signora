@@ -46,7 +46,7 @@ func main() {
 		log.Printf("Mailer configured with provider: %s", mailer.Provider())
 	}
 
-	auth := handlers.AuthHandler{DB: db, Secret: cfg.JWTSecret}
+	auth := handlers.AuthHandler{DB: db, Secret: cfg.JWTSecret, FrontendURL: cfg.FrontendURL, Mailer: mailer}
 	docs := handlers.DocumentHandler{DB: db, UploadDir: cfg.UploadDir}
 	signers := handlers.SignersHandler{DB: db, FrontendURL: cfg.FrontendURL, Mailer: mailer}
 	boxes := handlers.BoxesHandler{DB: db}
@@ -138,6 +138,8 @@ func main() {
 	// Public Auth endpoints
 	mux.HandleFunc("POST /api/auth/register", auth.Register)
 	mux.HandleFunc("POST /api/auth/login", auth.Login)
+	mux.HandleFunc("POST /api/auth/forgot-password", auth.ForgotPassword)
+	mux.HandleFunc("POST /api/auth/reset-password", auth.ResetPassword)
 
 	// Public Signing endpoints (token-based access)
 	mux.HandleFunc("GET /api/signing/{token}", signing.GetSigningInfo)

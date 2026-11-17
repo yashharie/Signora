@@ -10,12 +10,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 	"phase1-signora/backend/internal/middleware"
+	"phase1-signora/backend/internal/services"
 	"phase1-signora/backend/internal/utils"
 )
 
 type AuthHandler struct {
-	DB     *pgxpool.Pool
-	Secret string
+	DB          *pgxpool.Pool
+	Secret      string
+	FrontendURL string
+	Mailer      interface {
+		Send(string, string, string, string, []services.Attachment) error
+	}
 }
 type authInput struct {
 	Name     string `json:"name"`

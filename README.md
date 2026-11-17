@@ -80,3 +80,23 @@ All routes use the existing Go server at the API base URL:
 Protected routes require `Authorization: Bearer <token>`; the shared frontend
 API client supplies it. Owner checks remain in the backend. Existing signing
 validation, token expiry/replay checks, and transactional signature storage remain.
+
+## Password recovery
+
+Apply the updated `backend/schema.sql` before using password recovery (it adds
+`password_resets`; startup does not migrate the database). Configure the existing
+SMTP settings and `FRONTEND_URL` to enable reset email delivery.
+
+The login page links to `/forgot-password`. `POST /api/auth/forgot-password`
+accepts `{ "email": "name@example.com" }` and returns the same confirmation for
+known and unknown addresses. Requests are normalized and limited to one email
+per account per minute. Delivery failures are logged without email addresses or
+tokens; no recovery token is returned by the API.
+
+Email links open `/reset-password#token=...`. The page removes the token from the
+address bar and submits it with the new password to `POST /api/auth/reset-password`
+as `{ "token": "...", "password": "..." }`. Tokens expire after 30 minutes;
+only SHA-256 hashes are stored. Consuming a token and updating the bcrypt password
+are atomic. A new request replaces the previous token. Passwords must contain
+8-72 bytes. Resetting does not automatically log in; existing JWT sessions retain
+their normal expiry (up to seven days).
