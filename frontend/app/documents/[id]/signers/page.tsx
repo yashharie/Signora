@@ -201,6 +201,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
     try {
       setSending(true);
       setError('');
+      setSuccess('');
       const res = await api.post(`/api/documents/${docId}/send`);
       setDocStatus('pending');
       const links: SignerLink[] = res.data.links || [];
@@ -209,7 +210,12 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
         return latest ? { ...signer, token: latest.token } : signer;
       }));
       setGeneratedLinks(links);
-      setSuccess('Signing links generated successfully! You can copy the link or share via WhatsApp below.');
+      const results: { email: string; error?: string; attachmentError?: string }[] = res.data.emailResults || [];
+      const warnings = results.flatMap(({ email, error, attachmentError }) =>
+        [error, attachmentError].filter(Boolean).map((message) => `${email} · ${message}`)
+      );
+      setSuccess(res.data.message);
+      if (warnings.length > 0) setError(warnings.join('\n'));
     } catch (err) {
       setError(getError(err));
     } finally {
@@ -306,7 +312,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
               onClick={handleSendForSigning}
               disabled={sending || signers.length === 0}
             >
-              <Send size={16} /> {sending ? 'Creating Links...' : 'Generate & Share Signing Links'}
+              <Send size={16} /> {sending ? 'Sending Invitations...' : 'Send for Signing'}
             </button>
             <button
               className="btn secondary sm"
@@ -319,7 +325,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
 
         <WorkflowStepper docId={docId} currentStep="signers" />
 
-        {error && <div className="error" style={{ marginBottom: 14 }}>{error}</div>}
+        {error && <div className="error" style={{ marginBottom: 14, whiteSpace: 'pre-line' }}>{error}</div>}
         {success && <div className="success" style={{ marginBottom: 14 }}>{success}</div>}
 
         {/* Unassigned boxes warning */}

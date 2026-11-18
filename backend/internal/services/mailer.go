@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/textproto"
 	"os"
 	"strings"
 	"time"
@@ -33,6 +34,28 @@ type Mailer struct {
 type Attachment struct {
 	Filename string
 	Path     string
+	Data     []byte
+}
+
+func (a Attachment) read() ([]byte, error) {
+	if a.Data != nil {
+		return a.Data, nil
+	}
+	return os.ReadFile(a.Path)
+}
+
+// ErrDeliveryUncertain means the provider may have accepted the message.
+var ErrDeliveryUncertain = errors.New("email delivery could not be confirmed")
+
+type brevoRejection int
+
+func (e brevoRejection) Error() string {
+	return fmt.Sprintf("brevo rejected email (HTTP %d)", e)
+}
+
+func IsAttachmentSizeRejection(err error) bool {
+	var rejection brevoRejection
+	return errors.As(err, &rejection) && rejection == http.StatusRequestEntityTooLarge
 }
 
 func (m *Mailer) Provider() string {
@@ -85,10 +108,10 @@ func (m *Mailer) Send(to, subject, htmlBody, textBody string, attachments []Atta
 	// 1. Resend API (HTTPS port 443 - works everywhere, never blocked on Railway)
 	if m.Provider() == "resend" {
 		if err := m.sendViaResend(to, subject, htmlBody, textBody, attachments); err != nil {
-			log.Printf("[MAILER RESEND ERROR] Delivery to %s failed: %v", to, err)
+			log.Print("[MAILER RESEND ERROR] Delivery failed")
 			return err
 		}
-		log.Printf("[MAILER RESEND SUCCESS] Email delivered to %s (subject: %q)", to, subject)
+		log.Print("[MAILER RESEND SUCCESS] Email accepted")
 		return nil
 	}
 
@@ -105,14 +128,14 @@ func (m *Mailer) Send(to, subject, htmlBody, textBody string, attachments []Atta
 	// 3. SMTP (ports 587 / 465)
 	msg, err := buildMessage(m.User, to, subject, htmlBody, textBody, attachments)
 	if err != nil {
-		log.Printf("[MAILER ERROR] Failed to build message for %s: %v", to, err)
+		log.Print("[MAILER SMTP ERROR] Failed to build message")
 		return err
 	}
 	if err := m.deliver(to, msg); err != nil {
-		log.Printf("[MAILER ERROR] Delivery to %s failed: %v", to, err)
+		log.Print("[MAILER SMTP ERROR] Delivery failed")
 		return err
 	}
-	log.Printf("[MAILER SUCCESS] Email delivered to %s (subject: %q)", to, subject)
+	log.Print("[MAILER SMTP SUCCESS] Email accepted")
 	return nil
 }
 
@@ -128,7 +151,7 @@ func (m *Mailer) sendViaResend(to, subject, htmlBody, textBody string, atts []At
 	}
 	var resendAtts []resendAtt
 	for _, a := range atts {
-		data, err := os.ReadFile(a.Path)
+		data, err := a.read()
 		if err != nil {
 			return fmt.Errorf("reading attachment %s: %w", a.Filename, err)
 		}
@@ -164,12 +187,15 @@ func (m *Mailer) sendViaResend(to, subject, htmlBody, textBody string, atts []At
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("resend HTTPS request failed: %w", err)
+		return ErrDeliveryUncertain
 	}
 	defer resp.Body.Close()
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout {
+			return ErrDeliveryUncertain
+		}
 		return fmt.Errorf("resend error (%d): %s", resp.StatusCode, string(bodyBytes))
 	}
 	return nil
@@ -203,7 +229,7 @@ func (m *Mailer) sendViaBrevo(to, subject, htmlBody, textBody string, atts []Att
 	}
 	var brevoAtts []brevoAtt
 	for _, a := range atts {
-		data, err := os.ReadFile(a.Path)
+		data, err := a.read()
 		if err != nil {
 			return fmt.Errorf("reading attachment %s: %w", a.Filename, err)
 		}
@@ -242,17 +268,18 @@ func (m *Mailer) sendViaBrevo(to, subject, htmlBody, textBody string, atts []Att
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return errors.New("brevo HTTPS request failed or timed out")
+		return ErrDeliveryUncertain
 	}
 	defer resp.Body.Close()
 
 	// Never return provider response bodies: they can echo credentials or reset links.
-	_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("brevo rejected email (HTTP %d)", resp.StatusCode)
-	}
-	if readErr != nil {
-		return errors.New("brevo response could not be read")
+		rejection := brevoRejection(resp.StatusCode)
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout {
+			return fmt.Errorf("%w: %s", ErrDeliveryUncertain, rejection)
+		}
+		return rejection
 	}
 	return nil
 }
@@ -260,11 +287,11 @@ func (m *Mailer) sendViaBrevo(to, subject, htmlBody, textBody string, atts []Att
 func (m *Mailer) deliver(to string, msg []byte) error {
 	// Try the configured port first
 	err := m.deliverToPort(to, msg, m.Host, m.Port)
-	if err == nil {
-		return nil
+	if err == nil || errors.Is(err, ErrDeliveryUncertain) {
+		return err
 	}
 
-	log.Printf("[MAILER WARNING] Delivery on port %s failed: %v", m.Port, err)
+	log.Print("[MAILER SMTP WARNING] Primary delivery attempt failed")
 
 	// Automatic fallback for Gmail / common SMTP servers between 587 and 465
 	// Cloud providers often restrict port 587 but leave 465 open (or vice versa)
@@ -282,7 +309,10 @@ func (m *Mailer) deliver(to string, msg []byte) error {
 			log.Printf("[MAILER] Fallback to port %s succeeded!", fallbackPort)
 			return nil
 		}
-		log.Printf("[MAILER WARNING] Fallback to port %s also failed: %v", fallbackPort, fallbackErr)
+		if errors.Is(fallbackErr, ErrDeliveryUncertain) {
+			return fallbackErr
+		}
+		log.Print("[MAILER SMTP WARNING] Fallback delivery attempt failed")
 		return fmt.Errorf("mail server unreachable (tried ports %s: %v, %s: %v). Note: Railway blocks outbound SMTP ports 587/465 on Free/Hobby plans. To send emails on Railway, set RESEND_API_KEY (from resend.com) or BREVO_API_KEY (from brevo.com) in Railway Variables, or upgrade to Railway Pro.", m.Port, err, fallbackPort, fallbackErr)
 	}
 
@@ -349,10 +379,16 @@ func (m *Mailer) deliverToPort(to string, msg []byte, host, port string) error {
 		return fmt.Errorf("writing email body failed: %w", err)
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("closing data failed: %w", err)
+		var reply *textproto.Error
+		if errors.As(err, &reply) {
+			return fmt.Errorf("SMTP server rejected message (code %d)", reply.Code)
+		}
+		return ErrDeliveryUncertain
 	}
 
-	return c.Quit()
+	// A successful DATA response means the server accepted the email.
+	_ = c.Quit()
+	return nil
 }
 
 var headerCleaner = strings.NewReplacer("\r", " ", "\n", " ")
@@ -378,7 +414,7 @@ func buildMessage(from, to, subject, htmlBody, textBody string, atts []Attachmen
 	b.WriteString("--" + alt + "--\r\n")
 
 	for _, a := range atts {
-		data, err := os.ReadFile(a.Path)
+		data, err := a.read()
 		if err != nil {
 			return nil, fmt.Errorf("cannot read attachment %s: %w", a.Filename, err)
 		}
@@ -456,7 +492,7 @@ func SigningRequestEmail(signerName, senderName, docTitle, link string, expires 
 		`<p style="margin:24px 0 0 0;font-size:12px;color:#94a3b8;word-break:break-all;">Or copy this link into your browser:<br>%s</p>`+
 		`</td></tr>`,
 		html.EscapeString(greeting), html.EscapeString(signerName), html.EscapeString(senderName),
-		html.EscapeString(docTitle), expires.Format("January 2, 2006 at 3:04 PM MST"), link, link)
+		html.EscapeString(docTitle), expires.Format("January 2, 2006 at 3:04 PM MST"), html.EscapeString(link), html.EscapeString(link))
 	textBody = fmt.Sprintf("Hello %s,\n\n%s has sent you \"%s\" for signature.\n\nPlease sign before %s:\n%s\n",
 		signerName, senderName, docTitle, expires.Format("Jan 2, 2006 3:04 PM MST"), link)
 	return subject, emailLayout(inner), textBody

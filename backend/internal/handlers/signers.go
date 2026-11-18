@@ -1,14 +1,19 @@
 package handlers
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"net/mail"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -27,6 +32,7 @@ const signingLinkTTL = 7 * 24 * time.Hour
 type SignersHandler struct {
 	DB          *pgxpool.Pool
 	FrontendURL string
+	UploadDir   string
 	Mailer      *services.Mailer
 }
 
@@ -225,13 +231,16 @@ type sendTarget struct {
 	ID, Name, Email, Token string
 	ExpiresAt              time.Time
 	EmailSent              bool
+	AttemptedAt            *time.Time
 }
 
 type emailResult struct {
-	Name    string `json:"name"`
-	Email   string `json:"email"`
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
+	Name            string `json:"name"`
+	Email           string `json:"email"`
+	Success         bool   `json:"success"`
+	AlreadySent     bool   `json:"alreadySent,omitempty"`
+	AttachmentError string `json:"attachmentError,omitempty"`
+	Error           string `json:"error,omitempty"`
 }
 
 type signerLink struct {
@@ -242,17 +251,16 @@ type signerLink struct {
 	SigningURL string `json:"signingUrl"`
 }
 
-// Send emails a signing link to every signer who has not signed yet.
-// Calling it again re-sends (as a reminder) and keeps working links valid. A failed email for one
-// signer never stops the others; each result is returned and written to the audit trail.
+// Send invites pending signers and reissues expired links.
 func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	docID := r.PathValue("id")
 	userID := middleware.CurrentUserID(r)
 	ip := utils.ClientIP(r)
 
-	var docTitle, status string
-	err := h.DB.QueryRow(ctx, `SELECT title, status FROM documents WHERE id=$1 AND user_id=$2`, docID, userID).Scan(&docTitle, &status)
+	var docTitle, status, storedName, originalName string
+	err := h.DB.QueryRow(ctx, `SELECT title, status, stored_name, original_name FROM documents WHERE id=$1 AND user_id=$2`, docID, userID).
+		Scan(&docTitle, &status, &storedName, &originalName)
 	if err != nil {
 		utils.Error(w, 404, "Document not found")
 		return
@@ -305,7 +313,7 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Load the signers who still need to sign
 	rows, err := h.DB.Query(ctx, `
-		SELECT id, name, email, token, token_expires_at, email_sent
+		SELECT id, name, email, token, token_expires_at, email_sent, email_sent_at
 		FROM signers
 		WHERE document_id=$1 AND status <> 'signed'
 		ORDER BY created_at ASC
@@ -317,7 +325,7 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 	var targets []sendTarget
 	for rows.Next() {
 		var t sendTarget
-		if err := rows.Scan(&t.ID, &t.Name, &t.Email, &t.Token, &t.ExpiresAt, &t.EmailSent); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Email, &t.Token, &t.ExpiresAt, &t.EmailSent, &t.AttemptedAt); err != nil {
 			rows.Close()
 			utils.Error(w, 500, "Could not read signers")
 			return
@@ -348,89 +356,153 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 		}
 		logAudit(ctx, h.DB, docID, "DOCUMENT_SENT", sender,
 			fmt.Sprintf("Document sent to %d signer(s) for electronic signatures", len(targets)), ip)
-	} else {
-		logAudit(ctx, h.DB, docID, "DOCUMENT_RESENT", sender,
-			fmt.Sprintf("Reminder sent to %d pending signer(s)", len(targets)), ip)
 	}
 
 	baseURL := strings.TrimRight(h.FrontendURL, "/")
 	results := make([]emailResult, 0, len(targets))
 	links := make([]signerLink, 0, len(targets))
-	sent, failed := 0, 0
+	sent, failed, skipped, attachmentFailures := 0, 0, 0, 0
+	loadAttachment := sync.OnceValues(func() ([]services.Attachment, string) {
+		return h.invitationAttachment(ctx, docID, userID, storedName, originalName)
+	})
 
 	for _, t := range targets {
 		res := emailResult{Name: t.Name, Email: t.Email}
-		token, expires := t.Token, t.ExpiresAt
-		now := time.Now()
-
-		// First email (or an expired link): start a fresh 7-day window, with a new token if expired.
-		if !t.EmailSent || now.After(expires) {
-			expires = now.Add(signingLinkTTL)
-			if now.After(t.ExpiresAt) {
-				token, err = generateSecureToken()
-				if err != nil {
-					res.Error = "could not create a secure signing link"
-					results = append(results, res)
-					failed++
-					logAudit(ctx, h.DB, docID, "EMAIL_FAILED", sender, fmt.Sprintf("Could not prepare link for %s (%s)", t.Name, t.Email), ip)
-					continue
-				}
-			}
-			if _, err := h.DB.Exec(ctx, `UPDATE signers SET token=$1, token_expires_at=$2 WHERE id=$3`, token, expires, t.ID); err != nil {
-				res.Error = "could not refresh the signing link"
-				results = append(results, res)
-				failed++
-				logAudit(ctx, h.DB, docID, "EMAIL_FAILED", sender, fmt.Sprintf("Could not prepare link for %s (%s)", t.Name, t.Email), ip)
-				continue
+		current := t
+		claimed := false
+		if t.canClaim(time.Now()) {
+			current, claimed, err = h.claimInvitation(ctx, docID, t)
+			if err != nil {
+				res.Error = "Could not prepare the invitation"
 			}
 		}
-
-		link := fmt.Sprintf("%s/sign/%s", baseURL, token)
-		links = append(links, signerLink{
-			SignerID: t.ID, Name: t.Name, Email: t.Email, Token: token, SigningURL: link,
-		})
-
-		subject, htmlBody, textBody := services.SigningRequestEmail(t.Name, senderName, docTitle, link, expires, t.EmailSent)
-		if err := h.Mailer.Send(t.Email, subject, htmlBody, textBody, nil); err != nil {
-			res.Error = shorten(err.Error(), 140)
-			results = append(results, res)
-			failed++
-			logAudit(ctx, h.DB, docID, "EMAIL_FAILED", sender,
-				fmt.Sprintf("Signing email to %s (%s) failed: %s", t.Name, t.Email, res.Error), ip)
-			continue
+		link := fmt.Sprintf("%s/sign/%s", baseURL, current.Token)
+		if current.Token != "" && time.Now().Before(current.ExpiresAt) {
+			links = append(links, signerLink{SignerID: t.ID, Name: t.Name, Email: t.Email, Token: current.Token, SigningURL: link})
 		}
-
-		_, _ = h.DB.Exec(ctx, `UPDATE signers SET email_sent=true, email_sent_at=NOW() WHERE id=$1`, t.ID)
-		res.Success = true
+		switch {
+		case claimed:
+			h.sendInvitation(ctx, current, senderName, docTitle, link, t.EmailSent, loadAttachment, &res)
+		case res.Error != "":
+		case current.EmailSent:
+			res.Success, res.AlreadySent = true, true
+		default:
+			res.Error = "An invitation is in progress or its delivery could not be confirmed. Share the signing link manually if needed"
+		}
 		results = append(results, res)
-		sent++
-		action, detail := "EMAIL_SENT", "Signing email sent to"
-		if t.EmailSent {
-			action, detail = "REMINDER_SENT", "Reminder email sent to"
-		}
-		logAudit(ctx, h.DB, docID, action, sender, fmt.Sprintf("%s %s (%s)", detail, t.Name, t.Email), ip)
-	}
 
-	msg := fmt.Sprintf("Document sent! Signing emails delivered to %d signer(s).", sent)
-	if failed > 0 {
-		var parts []string
-		for _, rs := range results {
-			if !rs.Success {
-				parts = append(parts, fmt.Sprintf("%s (%s)", rs.Email, rs.Error))
+		switch {
+		case res.AlreadySent:
+			skipped++
+		case res.Success:
+			sent++
+			action := "EMAIL_SENT"
+			if t.EmailSent {
+				action = "REMINDER_SENT"
 			}
+			logAudit(ctx, h.DB, docID, action, sender, fmt.Sprintf("Signing email accepted for %s (%s)", t.Name, t.Email), ip)
+		default:
+			failed++
+			logAudit(ctx, h.DB, docID, "EMAIL_FAILED", sender, res.Error, ip)
 		}
-		msg = fmt.Sprintf("Sent %d of %d emails. Failed: %s. You can still share the signing links below manually.",
-			sent, len(results), strings.Join(parts, "; "))
+		if res.AttachmentError != "" {
+			attachmentFailures++
+			logAudit(ctx, h.DB, docID, "ATTACHMENT_FAILED", sender, res.AttachmentError, ip)
+		}
 	}
 
+	msg := fmt.Sprintf("%d invitation(s) sent, %d already sent, %d failed or unconfirmed.", sent, skipped, failed)
+
+	w.Header().Set("Cache-Control", "no-store")
 	utils.JSON(w, 200, map[string]any{
-		"message":      msg,
-		"status":       "pending",
-		"links":        links,
-		"emailResults": results,
-		"emailsSent":   sent,
-		"emailsFailed": failed,
+		"message":            msg,
+		"status":             "pending",
+		"links":              links,
+		"emailResults":       results,
+		"emailsSent":         sent,
+		"emailsFailed":       failed,
+		"attachmentFailures": attachmentFailures,
 	})
+}
+
+func (t sendTarget) canClaim(now time.Time) bool {
+	return !now.Before(t.ExpiresAt) || (!t.EmailSent && t.AttemptedAt == nil)
+}
+
+func (h SignersHandler) claimInvitation(ctx context.Context, docID string, t sendTarget) (sendTarget, bool, error) {
+	now := time.Now()
+	token := t.Token
+	if !now.Before(t.ExpiresAt) {
+		var err error
+		token, err = generateSecureToken()
+		if err != nil {
+			return t, false, err
+		}
+	}
+
+	// A timestamp on an unsent row reserves delivery across requests and API instances.
+	current := t
+	err := h.DB.QueryRow(ctx, `
+		UPDATE signers s
+		SET token=$3, token_expires_at=$4, email_sent=false, email_sent_at=NOW()
+		WHERE s.id=$1 AND s.document_id=$2 AND s.status <> 'signed' AND s.token=$5
+		  AND (s.token_expires_at <= NOW() OR (NOT s.email_sent AND s.email_sent_at IS NULL))
+		  AND EXISTS (SELECT 1 FROM signature_boxes b WHERE b.document_id=s.document_id AND b.signer_id=s.id)
+		  AND EXISTS (SELECT 1 FROM documents d WHERE d.id=s.document_id AND d.status='pending')
+		RETURNING token, token_expires_at, email_sent, email_sent_at
+	`, t.ID, docID, token, now.Add(signingLinkTTL), t.Token).
+		Scan(&current.Token, &current.ExpiresAt, &current.EmailSent, &current.AttemptedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = h.DB.QueryRow(ctx, `SELECT token, token_expires_at, email_sent, email_sent_at
+			FROM signers WHERE id=$1 AND document_id=$2 AND status <> 'signed'`, t.ID, docID).
+			Scan(&current.Token, &current.ExpiresAt, &current.EmailSent, &current.AttemptedAt)
+		if err != nil {
+			return sendTarget{}, false, err
+		}
+		return current, false, nil
+	}
+	return current, err == nil, err
+}
+
+func (h SignersHandler) sendInvitation(ctx context.Context, target sendTarget, sender, title, link string, reminder bool, loadAttachment func() ([]services.Attachment, string), result *emailResult) {
+	var err error
+	address, parseErr := mail.ParseAddress(target.Email)
+	if parseErr != nil || address.Address != target.Email || len(target.Email) > 255 || !emailRegex.MatchString(target.Email) {
+		result.Error = "Invalid signer email address"
+	} else {
+		attachments, attachmentError := loadAttachment()
+		result.AttachmentError = attachmentError
+		subject, htmlBody, textBody := services.SigningRequestEmail(target.Name, sender, title, link, target.ExpiresAt, reminder)
+		err = sendInvitationEmail(h.Mailer.Send, target.Email, subject, htmlBody, textBody, attachments, result)
+	}
+	if errors.Is(err, services.ErrDeliveryUncertain) {
+		result.Error = "Delivery could not be confirmed. Share the signing link manually if needed"
+		return
+	}
+	if err != nil {
+		result.Error = "The mail provider rejected the invitation or could not send it"
+	}
+	result.Success = result.Error == ""
+
+	// Record the outcome even if the client disconnected while the provider was sending.
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	updated, writeErr := h.DB.Exec(finishCtx, `
+		UPDATE signers SET email_sent=$4, email_sent_at=CASE WHEN $4 THEN NOW() ELSE NULL END
+		WHERE id=$1 AND token=$2 AND email_sent_at=$3 AND NOT email_sent
+	`, target.ID, target.Token, target.AttemptedAt, result.Success)
+	if writeErr != nil || updated.RowsAffected() != 1 {
+		log.Print("Could not record signing invitation outcome")
+	}
+}
+
+func sendInvitationEmail(send func(string, string, string, string, []services.Attachment) error, to, subject, htmlBody, textBody string, attachments []services.Attachment, result *emailResult) error {
+	err := send(to, subject, htmlBody, textBody, attachments)
+	if len(attachments) != 0 && services.IsAttachmentSizeRejection(err) {
+		result.AttachmentError = "The mail provider rejected the PDF size. The invitation was retried with the signing link only"
+		return send(to, subject, htmlBody, textBody, nil)
+	}
+	return err
 }
 
 func generateSecureToken() (string, error) {

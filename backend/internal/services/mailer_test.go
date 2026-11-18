@@ -94,6 +94,50 @@ func TestBrevoSafeErrors(t *testing.T) {
 	}
 }
 
+func TestBrevoSigningInvitation(t *testing.T) {
+	const pdf = "%PDF-1.7\nunchanged original"
+	const link = "https://signora.example/sign/test-signer-token"
+	const title = "Supplier Agreement"
+	calls := 0
+	m := testBrevo(func(r *http.Request) (*http.Response, error) {
+		calls++
+		var payload struct {
+			To          []map[string]string
+			Subject     string
+			HTMLContent string
+			TextContent string
+			Attachment  []struct{ Name, Content string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload.To) != 1 || payload.To[0]["email"] != "signer@example.com" ||
+			!strings.Contains(payload.Subject, title) || !strings.Contains(payload.HTMLContent, "Sign Document") ||
+			!strings.Contains(payload.HTMLContent, link) || !strings.Contains(payload.TextContent, link) {
+			t.Fatal("invitation recipient or content is incorrect")
+		}
+		if calls == 1 {
+			if len(payload.Attachment) != 1 || payload.Attachment[0].Name != "agreement.pdf" ||
+				payload.Attachment[0].Content != base64.StdEncoding.EncodeToString([]byte(pdf)) {
+				t.Fatal("original PDF attachment missing or changed")
+			}
+			return mailResponse(http.StatusRequestEntityTooLarge, "ignored provider body"), nil
+		}
+		if len(payload.Attachment) != 0 {
+			t.Fatal("link-only email unexpectedly contains an attachment")
+		}
+		return mailResponse(http.StatusCreated, "{}"), nil
+	})
+	subject, htmlBody, textBody := SigningRequestEmail("Signer", "Sender", title, link, time.Now().Add(time.Hour), false)
+	attachments := []Attachment{{Filename: "agreement.pdf", Data: []byte(pdf)}}
+	if err := m.Send("signer@example.com", subject, htmlBody, textBody, attachments); !IsAttachmentSizeRejection(err) || errors.Is(err, ErrDeliveryUncertain) {
+		t.Fatalf("size rejection was misclassified: %v", err)
+	}
+	if err := m.Send("signer@example.com", subject, htmlBody, textBody, nil); err != nil || calls != 2 {
+		t.Fatalf("link-only delivery failed: %v", err)
+	}
+}
+
 func TestBrevoTimeoutAndRedirectPolicy(t *testing.T) {
 	m := testBrevo(func(r *http.Request) (*http.Response, error) { <-r.Context().Done(); return nil, r.Context().Err() })
 	m.brevoClient.Timeout = 10 * time.Millisecond

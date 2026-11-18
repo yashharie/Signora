@@ -50,7 +50,7 @@ func main() {
 
 	auth := handlers.AuthHandler{DB: db, Secret: cfg.JWTSecret, FrontendURL: cfg.FrontendURL, Mailer: mailer}
 	docs := handlers.DocumentHandler{DB: db, UploadDir: cfg.UploadDir}
-	signers := handlers.SignersHandler{DB: db, FrontendURL: cfg.FrontendURL, Mailer: mailer}
+	signers := handlers.SignersHandler{DB: db, FrontendURL: cfg.FrontendURL, UploadDir: cfg.UploadDir, Mailer: mailer}
 	boxes := handlers.BoxesHandler{DB: db}
 	status := handlers.StatusHandler{DB: db, UploadDir: cfg.UploadDir, SignedDir: cfg.SignedDir, Mailer: mailer}
 	signing := handlers.SigningHandler{DB: db, UploadDir: cfg.UploadDir, SignedDir: cfg.SignedDir, Mailer: mailer}
