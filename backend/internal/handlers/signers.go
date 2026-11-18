@@ -235,13 +235,24 @@ type sendTarget struct {
 }
 
 type emailResult struct {
-	Name            string `json:"name"`
-	Email           string `json:"email"`
-	Success         bool   `json:"success"`
-	AlreadySent     bool   `json:"alreadySent,omitempty"`
-	AttachmentError string `json:"attachmentError,omitempty"`
-	Error           string `json:"error,omitempty"`
+	Name            string            `json:"name"`
+	Email           string            `json:"email"`
+	Success         bool              `json:"success"`
+	AlreadySent     bool              `json:"alreadySent,omitempty"`
+	AttachmentError string            `json:"attachmentError,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	Outcome         invitationOutcome `json:"outcome"`
 }
+
+type invitationOutcome string
+
+const (
+	invitationSent           invitationOutcome = "sent"
+	invitationFailed         invitationOutcome = "failed"
+	invitationAlreadySent    invitationOutcome = "already_sent"
+	invitationUnconfirmed    invitationOutcome = "unconfirmed"
+	invitationSentWithoutPDF invitationOutcome = "sent_without_pdf"
+)
 
 type signerLink struct {
 	SignerID   string `json:"signerId"`
@@ -367,7 +378,7 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 	})
 
 	for _, t := range targets {
-		res := emailResult{Name: t.Name, Email: t.Email}
+		res := emailResult{Name: t.Name, Email: t.Email, Outcome: invitationFailed}
 		current := t
 		claimed := false
 		if t.canClaim(time.Now()) {
@@ -386,7 +397,9 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 		case res.Error != "":
 		case current.EmailSent:
 			res.Success, res.AlreadySent = true, true
+			res.Outcome = invitationAlreadySent
 		default:
+			res.Outcome = invitationUnconfirmed
 			res.Error = "An invitation is in progress or its delivery could not be confirmed. Share the signing link manually if needed"
 		}
 		results = append(results, res)
@@ -465,7 +478,6 @@ func (h SignersHandler) claimInvitation(ctx context.Context, docID string, t sen
 }
 
 func (h SignersHandler) sendInvitation(ctx context.Context, target sendTarget, sender, title, link string, reminder bool, loadAttachment func() ([]services.Attachment, string), result *emailResult) {
-	var err error
 	address, parseErr := mail.ParseAddress(target.Email)
 	if parseErr != nil || address.Address != target.Email || len(target.Email) > 255 || !emailRegex.MatchString(target.Email) {
 		result.Error = "Invalid signer email address"
@@ -473,16 +485,11 @@ func (h SignersHandler) sendInvitation(ctx context.Context, target sendTarget, s
 		attachments, attachmentError := loadAttachment()
 		result.AttachmentError = attachmentError
 		subject, htmlBody, textBody := services.SigningRequestEmail(target.Name, sender, title, link, target.ExpiresAt, reminder)
-		err = sendInvitationEmail(h.Mailer.Send, target.Email, subject, htmlBody, textBody, attachments, result)
+		sendInvitationEmail(h.Mailer.Send, target.Email, subject, htmlBody, textBody, attachments, result)
 	}
-	if errors.Is(err, services.ErrDeliveryUncertain) {
-		result.Error = "Delivery could not be confirmed. Share the signing link manually if needed"
+	if result.Outcome == invitationUnconfirmed {
 		return
 	}
-	if err != nil {
-		result.Error = "The mail provider rejected the invitation or could not send it"
-	}
-	result.Success = result.Error == ""
 
 	// Record the outcome even if the client disconnected while the provider was sending.
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -496,13 +503,26 @@ func (h SignersHandler) sendInvitation(ctx context.Context, target sendTarget, s
 	}
 }
 
-func sendInvitationEmail(send func(string, string, string, string, []services.Attachment) error, to, subject, htmlBody, textBody string, attachments []services.Attachment, result *emailResult) error {
+func sendInvitationEmail(send func(string, string, string, string, []services.Attachment) error, to, subject, htmlBody, textBody string, attachments []services.Attachment, result *emailResult) {
 	err := send(to, subject, htmlBody, textBody, attachments)
 	if len(attachments) != 0 && services.IsAttachmentSizeRejection(err) {
 		result.AttachmentError = "The mail provider rejected the PDF size. The invitation was retried with the signing link only"
-		return send(to, subject, htmlBody, textBody, nil)
+		err = send(to, subject, htmlBody, textBody, nil)
 	}
-	return err
+	switch {
+	case errors.Is(err, services.ErrDeliveryUncertain):
+		result.Outcome = invitationUnconfirmed
+		result.Error = "Delivery could not be confirmed. Share the signing link manually if needed"
+	case err != nil:
+		result.Outcome = invitationFailed
+		result.Error = "The mail provider rejected the invitation or could not send it"
+	default:
+		result.Success = true
+		result.Outcome = invitationSent
+		if result.AttachmentError != "" {
+			result.Outcome = invitationSentWithoutPDF
+		}
+	}
 }
 
 func generateSecureToken() (string, error) {

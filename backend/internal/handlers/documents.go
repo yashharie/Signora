@@ -1,21 +1,33 @@
 package handlers
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"phase1-signora/backend/internal/middleware"
 	"phase1-signora/backend/internal/utils"
-	"strings"
 )
 
+type documentDB interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
 type DocumentHandler struct {
-	DB        *pgxpool.Pool
+	DB        documentDB
 	UploadDir string
 }
 
@@ -112,38 +124,53 @@ func (h DocumentHandler) Download(w http.ResponseWriter, r *http.Request) { h.se
 func (h DocumentHandler) serveFile(w http.ResponseWriter, r *http.Request, download bool) {
 	id := r.PathValue("id")
 	var stored, name string
-	err := h.DB.QueryRow(r.Context(), `SELECT stored_name,original_name FROM documents WHERE id=$1 AND user_id=$2`, id, middleware.CurrentUserID(r)).Scan(&stored, &name)
-	if err == pgx.ErrNoRows {
+	var data []byte
+	err := h.DB.QueryRow(r.Context(), `SELECT stored_name,original_name,file_data FROM documents WHERE id=$1 AND user_id=$2`, id, middleware.CurrentUserID(r)).Scan(&stored, &name, &data)
+	if errors.Is(err, pgx.ErrNoRows) {
 		utils.Error(w, 404, "Document not found")
 		return
 	}
 	if err != nil {
-		utils.Error(w, 500, "Could not load document")
+		utils.Error(w, 500, "Could not read the original PDF from the database")
 		return
 	}
-	path := filepath.Join(h.UploadDir, filepath.Base(stored))
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		var dbBytes []byte
-		_ = h.DB.QueryRow(r.Context(), `SELECT file_data FROM documents WHERE id=$1`, id).Scan(&dbBytes)
-		if len(dbBytes) > 0 {
-			_ = os.WriteFile(path, dbBytes, 0644)
-			w.Header().Set("Content-Type", "application/pdf")
-			if download {
-				w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, strings.ReplaceAll(name, "\"", "")))
-			} else {
-				w.Header().Set("Content-Disposition", "inline")
-			}
-			w.Write(dbBytes)
+
+	var content io.ReadSeeker = bytes.NewReader(data)
+	var modified time.Time
+	if len(data) == 0 {
+		if stored == "" || stored == "." || stored == ".." || filepath.Base(stored) != stored {
+			utils.Error(w, 404, "Original PDF is unavailable")
 			return
 		}
+		file, err := os.Open(filepath.Join(h.UploadDir, stored))
+		if errors.Is(err, os.ErrNotExist) {
+			utils.Error(w, 404, "Original PDF is unavailable")
+			return
+		}
+		if err != nil {
+			utils.Error(w, 500, "Could not read the original PDF from storage")
+			return
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			utils.Error(w, 500, "Could not read the original PDF from storage")
+			return
+		}
+		if !info.Mode().IsRegular() || info.Size() == 0 {
+			utils.Error(w, 404, "Original PDF is unavailable")
+			return
+		}
+		content, modified = file, info.ModTime()
 	}
+
 	w.Header().Set("Content-Type", "application/pdf")
+	disposition := "inline"
 	if download {
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, strings.ReplaceAll(name, "\"", "")))
-	} else {
-		w.Header().Set("Content-Disposition", "inline")
+		disposition = mime.FormatMediaType("attachment", map[string]string{"filename": name})
 	}
-	http.ServeFile(w, r, path)
+	w.Header().Set("Content-Disposition", disposition)
+	http.ServeContent(w, r, name, modified, content)
 }
 func (h DocumentHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")

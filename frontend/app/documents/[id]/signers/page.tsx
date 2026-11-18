@@ -12,7 +12,6 @@ import {
   Copy,
   Check,
   AlertCircle,
-  FileCheck,
 } from 'lucide-react';
 import Nav from '@/components/Nav';
 import WorkflowStepper from '@/components/WorkflowStepper';
@@ -43,6 +42,31 @@ interface SignerLink {
   signingUrl: string;
 }
 
+const invitationLabels = {
+  sent: 'Sent',
+  failed: 'Failed',
+  already_sent: 'Already Sent',
+  unconfirmed: 'Unconfirmed',
+  sent_without_pdf: 'Sent Without PDF Attachment',
+};
+
+interface InvitationResult {
+  name: string;
+  email: string;
+  outcome?: keyof typeof invitationLabels;
+  success: boolean;
+  alreadySent?: boolean;
+  error?: string;
+  attachmentError?: string;
+}
+
+function invitationLabel(result: InvitationResult) {
+  if (result.outcome) return invitationLabels[result.outcome];
+  if (result.alreadySent) return invitationLabels.already_sent;
+  if (result.success) return result.attachmentError ? invitationLabels.sent_without_pdf : invitationLabels.sent;
+  return result.error?.includes('could not be confirmed') ? invitationLabels.unconfirmed : invitationLabels.failed;
+}
+
 export default function SignersPage({ params }: { params: Promise<{ id: string }> }) {
   const router = useRouter();
   const resolvedParams = use(params);
@@ -60,8 +84,8 @@ export default function SignersPage({ params }: { params: Promise<{ id: string }
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
-  const [generatedLinks, setGeneratedLinks] = useState<SignerLink[] | null>(null);
-  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
+  const [invitationResults, setInvitationResults] = useState<InvitationResult[]>([]);
+  const [copiedSigner, setCopiedSigner] = useState<string | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -139,16 +163,7 @@ export default function SignersPage({ params }: { params: Promise<{ id: string }
       setEmail('');
       setDocStatus('pending');
 
-      const url = res.data.signingUrl || signingLink(newSigner.token);
-      const newLink: SignerLink = {
-        signerId: newSigner.id,
-        name: newSigner.name,
-        email: newSigner.email,
-        token: newSigner.token,
-        signingUrl: url,
-      };
-      setGeneratedLinks([newLink]);
-      setSuccess(`Signer ${trimmedName} added! Their signing link is ready to copy or share below.`);
+      setSuccess(`Signer ${trimmedName} added. Use Send for Signing when their boxes are assigned.`);
       const returnBox = new URLSearchParams(window.location.search).get('returnBox');
 
 if (returnBox !== null && /^\d+$/.test(returnBox)) {
@@ -202,6 +217,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
       setSending(true);
       setError('');
       setSuccess('');
+      setInvitationResults([]);
       const res = await api.post(`/api/documents/${docId}/send`);
       setDocStatus('pending');
       const links: SignerLink[] = res.data.links || [];
@@ -209,13 +225,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
         const latest = links.find((link) => link.signerId === signer.id);
         return latest ? { ...signer, token: latest.token } : signer;
       }));
-      setGeneratedLinks(links);
-      const results: { email: string; error?: string; attachmentError?: string }[] = res.data.emailResults || [];
-      const warnings = results.flatMap(({ email, error, attachmentError }) =>
-        [error, attachmentError].filter(Boolean).map((message) => `${email} · ${message}`)
-      );
-      setSuccess(res.data.message);
-      if (warnings.length > 0) setError(warnings.join('\n'));
+      setInvitationResults(res.data.emailResults || []);
     } catch (err) {
       setError(getError(err));
     } finally {
@@ -245,31 +255,23 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
       setError('This signing link has expired. Resend the signing request to issue a current link.');
       return null;
     }
-    const currentToken = latestSigner.token;
-    const url = signingLink(currentToken);
-    setGeneratedLinks((current) => current?.map((link) =>
-      link.signerId === signerId ? { ...link, token: currentToken, signingUrl: url } : link
-    ) || null);
-    return url;
+    return signingLink(latestSigner.token);
   }
 
-  async function copyToClipboard(signerId: string, index: number) {
+  async function copyToClipboard(signerId: string) {
     setError('');
     try {
       const url = await getCurrentSigningLink(signerId);
       if (!url) return;
       await navigator.clipboard.writeText(url);
-      setGeneratedLinks((current) => current?.map((link) =>
-        link.signerId === signerId ? { ...link, signingUrl: url } : link
-      ) || null);
-      setCopiedIndex(index);
-      setTimeout(() => setCopiedIndex(null), 2500);
+      setCopiedSigner(signerId);
+      setTimeout(() => setCopiedSigner((current) => current === signerId ? null : current), 2500);
     } catch (err) {
       setError(getError(err));
     }
   }
 
-  async function openSigningLink(signerId: string) {
+  async function openSigningLink(signer: Signer, viaWhatsApp = false) {
     setError('');
     const popup = window.open('about:blank', '_blank');
     if (!popup) {
@@ -278,9 +280,14 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
     }
     popup.opener = null;
     try {
-      const url = await getCurrentSigningLink(signerId);
-      if (url) popup.location.href = url;
-      else popup.close();
+      const url = await getCurrentSigningLink(signer.id);
+      if (!url) {
+        popup.close();
+        return;
+      }
+      popup.location.href = viaWhatsApp
+        ? `https://api.whatsapp.com/send?text=${encodeURIComponent(`Hello ${signer.name}, please review and sign this document: ${url}`)}`
+        : url;
     } catch (err) {
       popup.close();
       setError(getError(err));
@@ -288,6 +295,9 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
   }
 
   const unassignedBoxes = boxes.filter((b) => !b.signerId).length;
+  const shareableSigners = docStatus === 'pending'
+    ? signers.filter((signer) => signer.status === 'pending' && signer.token)
+    : [];
 
   return (
     <>
@@ -312,7 +322,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
               onClick={handleSendForSigning}
               disabled={sending || signers.length === 0}
             >
-              <Send size={16} /> {sending ? 'Sending Invitations...' : 'Send for Signing'}
+              <Send size={16} /> {sending ? 'Sending Emails...' : 'Send for Signing'}
             </button>
             <button
               className="btn secondary sm"
@@ -324,6 +334,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
         </div>
 
         <WorkflowStepper docId={docId} currentStep="signers" />
+        <p className="muted">Send for Signing automatically emails each assigned signer their secure signing link and the PDF when it can be attached.</p>
 
         {error && <div className="error" style={{ marginBottom: 14, whiteSpace: 'pre-line' }}>{error}</div>}
         {success && <div className="success" style={{ marginBottom: 14 }}>{success}</div>}
@@ -462,44 +473,6 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
                           </span>
                         </div>
 
-                        {signer.token && signer.status === 'pending' && (
-                          <div style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-                            <button
-                              type="button"
-                              className="btn sm secondary"
-                              onClick={() => copyToClipboard(signer.id, -1)}
-                              style={{ fontSize: 11, padding: '3px 8px' }}
-                            >
-                              <Copy size={12} /> Copy Link
-                            </button>
-                            <a
-                              href={`https://api.whatsapp.com/send?text=${encodeURIComponent(`Hello ${signer.name}, please review and sign this document: ${signingLink(signer.token)}`)}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="btn sm"
-                              style={{
-                                background: '#16a34a',
-                                color: '#fff',
-                                textDecoration: 'none',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: 3,
-                                fontSize: 11,
-                                padding: '3px 8px',
-                              }}
-                            >
-                              WhatsApp
-                            </a>
-                            <button
-                              type="button"
-                              className="btn sm ghost"
-                              onClick={() => openSigningLink(signer.id)}
-                              style={{ fontSize: 11, padding: '3px 8px' }}
-                            >
-                              Sign Now <ArrowRight size={11} />
-                            </button>
-                          </div>
-                        )}
                       </div>
 
                       <button
@@ -518,102 +491,46 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
           </div>
         </div>
 
-        {/* Modal showing generated signing links when document is sent */}
-        {generatedLinks && (
-          <div className="modal-overlay" onClick={() => setGeneratedLinks(null)}>
-            <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 600 }}>
-              <div className="row" style={{ marginBottom: 14 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <FileCheck size={26} color="#16a34a" />
-                  <h2 style={{ margin: 0, fontSize: 19, fontWeight: 700 }}>Signing Links Ready</h2>
+        <div role="status" aria-live="polite">
+          {invitationResults.length > 0 && (
+            <section className="card" style={{ marginTop: 16 }}>
+              <h2 style={{ fontSize: 18, marginTop: 0 }}>Email Invitation Results</h2>
+              <p className="muted">Sent means the mail provider accepted the email.</p>
+              <ul style={{ paddingLeft: 20 }}>
+                {invitationResults.map((result) => (
+                  <li key={result.email} style={{ marginBottom: 8 }}>
+                    <strong>{result.name}</strong> ({result.email}) — {invitationLabel(result)}
+                    {result.error && <div className="muted">{result.error}</div>}
+                    {result.attachmentError && <div className="muted">{result.attachmentError}</div>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+        </div>
+
+        {shareableSigners.length > 0 && (
+          <details className="card" style={{ marginTop: 16 }}>
+            <summary style={{ cursor: 'pointer', fontWeight: 700 }}>Manual Sharing (Optional)</summary>
+            <p className="muted">Copy a signing link or open WhatsApp to share it yourself.</p>
+            {shareableSigners.map((signer) => (
+              <div className="row" key={signer.id} style={{ marginTop: 8, flexWrap: 'wrap' }}>
+                <span>{signer.name} ({signer.email})</span>
+                <div className="actions">
+                  <button type="button" className="btn sm secondary" onClick={() => copyToClipboard(signer.id)}>
+                    {copiedSigner === signer.id ? <Check size={14} /> : <Copy size={14} />}
+                    {copiedSigner === signer.id ? 'Copied' : 'Copy Link'}
+                  </button>
+                  <button type="button" className="btn sm secondary" onClick={() => openSigningLink(signer, true)}>
+                    WhatsApp
+                  </button>
+                  <button type="button" className="btn sm ghost" onClick={() => openSigningLink(signer)}>
+                    Open <ArrowRight size={13} />
+                  </button>
                 </div>
               </div>
-
-              <p className="muted" style={{ margin: '0 0 16px' }}>
-                Share each recipient&apos;s secure signing link using the copy or open controls below.
-              </p>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 20 }}>
-                {generatedLinks.map((link, idx) => (
-                  <div
-                    key={link.signerId}
-                    style={{
-                      padding: '12px 14px',
-                      background: '#f8fafc',
-                      borderRadius: 10,
-                      border: '1px solid #e2e8f0',
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 4 }}>
-                      {link.name} ({link.email})
-                    </div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <input
-                        type="text"
-                        readOnly
-                        value={link.signingUrl}
-                        style={{
-                          flex: 1,
-                          fontSize: 12,
-                          padding: '6px 10px',
-                          background: '#fff',
-                          border: '1px solid #cbd5e1',
-                          borderRadius: 6,
-                        }}
-                      />
-                      <button
-                        className="btn sm secondary"
-                        onClick={() => copyToClipboard(link.signerId, idx)}
-                      >
-                        {copiedIndex === idx ? <Check size={14} color="#16a34a" /> : <Copy size={14} />}
-                        {copiedIndex === idx ? 'Copied' : 'Copy'}
-                      </button>
-                      <a
-                        href={`https://api.whatsapp.com/send?text=${encodeURIComponent(`Hello ${link.name}, please review and sign this document: ${link.signingUrl}`)}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="btn sm"
-                        style={{
-                          background: '#16a34a',
-                          color: '#fff',
-                          textDecoration: 'none',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: 4,
-                          fontSize: 12,
-                          padding: '6px 10px',
-                        }}
-                      >
-                        WhatsApp
-                      </a>
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        onClick={() => openSigningLink(link.signerId)}
-                      >
-                        Open <ArrowRight size={13} />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-                <button
-                  className="btn secondary"
-                  onClick={() => setGeneratedLinks(null)}
-                >
-                  Close
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => router.push(`/documents/${docId}/status`)}
-                >
-                  Track in Status Page <ArrowRight size={15} />
-                </button>
-              </div>
-            </div>
-          </div>
+            ))}
+          </details>
         )}
       </main>
     </>

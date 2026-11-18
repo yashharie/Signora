@@ -426,45 +426,48 @@ export default function DocumentStatusPage({ params }: { params: Promise<{ id: s
                             Signing link expired — resend the request to renew it.
                           </div>
                         ) : (
-                          <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
-                            <button
-                              className="btn sm secondary"
-                              onClick={() => copySignerLink(signer.id)}
-                            >
-                              {copiedToken === signer.id ? (
-                                <Check size={13} color="#16a34a" />
-                              ) : (
-                                <Copy size={13} />
-                              )}
-                              {copiedToken === signer.id ? 'Link Copied' : 'Copy Signing Link'}
-                            </button>
-                            <a
-                              href={`https://api.whatsapp.com/send?text=${encodeURIComponent(`Hello ${signer.name}, please review and sign this document: ${signingLink(signer.token)}`)}`}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="btn sm"
-                              style={{
-                                background: '#16a34a',
-                                color: '#fff',
-                                textDecoration: 'none',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: 4,
-                                fontSize: 12,
-                                padding: '6px 10px',
-                              }}
-                            >
-                              WhatsApp
-                            </a>
-                            <button
-                              type="button"
-                              onClick={() => openSignerLink(signer.id)}
-                              className="btn sm ghost"
-                              style={{ fontSize: 12 }}
-                            >
-                              Open <ExternalLink size={12} />
-                            </button>
-                          </div>
+                          <details style={{ marginTop: 8 }}>
+                            <summary className="muted" style={{ cursor: 'pointer' }}>Manual Sharing (Optional)</summary>
+                            <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                              <button
+                                className="btn sm secondary"
+                                onClick={() => copySignerLink(signer.id)}
+                              >
+                                {copiedToken === signer.id ? (
+                                  <Check size={13} color="#16a34a" />
+                                ) : (
+                                  <Copy size={13} />
+                                )}
+                                {copiedToken === signer.id ? 'Link Copied' : 'Copy Signing Link'}
+                              </button>
+                              <a
+                                href={`https://api.whatsapp.com/send?text=${encodeURIComponent(`Hello ${signer.name}, please review and sign this document: ${signingLink(signer.token)}`)}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="btn sm"
+                                style={{
+                                  background: '#16a34a',
+                                  color: '#fff',
+                                  textDecoration: 'none',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: 4,
+                                  fontSize: 12,
+                                  padding: '6px 10px',
+                                }}
+                              >
+                                WhatsApp
+                              </a>
+                              <button
+                                type="button"
+                                onClick={() => openSignerLink(signer.id)}
+                                className="btn sm ghost"
+                                style={{ fontSize: 12 }}
+                              >
+                                Open <ExternalLink size={12} />
+                              </button>
+                            </div>
+                          </details>
                         )}
                       </div>
                     );

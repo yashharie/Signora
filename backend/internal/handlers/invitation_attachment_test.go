@@ -3,7 +3,6 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -83,8 +82,8 @@ func TestInvitationDoesNotResendUncertainDelivery(t *testing.T) {
 		return services.ErrDeliveryUncertain
 	}
 	var result emailResult
-	err := sendInvitationEmail(send, "signer@example.com", "Agreement", "signing link", "signing link", pdf, &result)
-	if !errors.Is(err, services.ErrDeliveryUncertain) || !reflect.DeepEqual(attachmentCounts, []int{1}) || result.AttachmentError != "" {
+	sendInvitationEmail(send, "signer@example.com", "Agreement", "signing link", "signing link", pdf, &result)
+	if result.Outcome != invitationUnconfirmed || result.Success || !reflect.DeepEqual(attachmentCounts, []int{1}) || result.AttachmentError != "" {
 		t.Fatal("uncertain send was retried or misclassified")
 	}
 }
@@ -121,8 +120,61 @@ func TestInvitationFallsBackToSameLinkAfterBrevoSizeRejection(t *testing.T) {
 	mailer := &services.Mailer{DeliveryProvider: "brevo", BrevoKey: "test-key", BrevoSender: "sender@example.com"}
 	pdf := []services.Attachment{{Filename: "original.pdf", Data: []byte("%PDF-1.7")}}
 	var result emailResult
-	err := sendInvitationEmail(mailer.Send, "signer@example.com", "Agreement", link, link, pdf, &result)
-	if err != nil || !reflect.DeepEqual(attachmentCounts, []int{1, 0}) || result.AttachmentError == "" {
-		t.Fatalf("link-only fallback did not complete correctly: %v", err)
+	sendInvitationEmail(mailer.Send, "signer@example.com", "Agreement", link, link, pdf, &result)
+	if result.Outcome != invitationSentWithoutPDF || !result.Success || !reflect.DeepEqual(attachmentCounts, []int{1, 0}) || result.AttachmentError == "" {
+		t.Fatalf("link-only fallback did not complete correctly: %+v", result)
+	}
+}
+
+func TestInvitationDeliveryResults(t *testing.T) {
+	const pdf = "%PDF-1.7 original"
+	originalTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = originalTransport })
+	mailer := &services.Mailer{DeliveryProvider: "brevo", BrevoKey: "test-key", BrevoSender: "sender@example.com"}
+	for _, tc := range []struct {
+		email, link string
+		status      int
+		want        invitationOutcome
+	}{
+		{"first@example.com", "https://signora.example/sign/first", http.StatusCreated, invitationSent},
+		{"second@example.com", "https://signora.example/sign/second", http.StatusCreated, invitationSent},
+		{"rejected@example.com", "https://signora.example/sign/rejected", http.StatusBadRequest, invitationFailed},
+		{"uncertain@example.com", "https://signora.example/sign/uncertain", http.StatusBadGateway, invitationUnconfirmed},
+	} {
+		t.Run(string(tc.want)+"/"+tc.email, func(t *testing.T) {
+			calls := 0
+			http.DefaultTransport = invitationTransport(func(req *http.Request) (*http.Response, error) {
+				calls++
+				var payload struct {
+					To                       []struct{ Email string }
+					HTMLContent, TextContent string
+					Attachment               []struct {
+						Name    string
+						Content []byte
+					}
+				}
+				if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				if req.URL.Host != "api.brevo.com" || len(payload.To) != 1 || payload.To[0].Email != tc.email ||
+					!strings.Contains(payload.HTMLContent, tc.link) || !strings.Contains(payload.TextContent, tc.link) ||
+					len(payload.Attachment) != 1 || payload.Attachment[0].Name != "original.pdf" || string(payload.Attachment[0].Content) != pdf {
+					t.Fatal("expected only this signer, their link, and the original PDF")
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader("private provider payload"))}, nil
+			})
+			subject, htmlBody, textBody := services.SigningRequestEmail("Signer", "Sender", "Agreement", tc.link, time.Now(), false)
+			attachments := []services.Attachment{{Filename: "original.pdf", Data: []byte(pdf)}}
+			result := emailResult{Email: tc.email}
+			sendInvitationEmail(mailer.Send, tc.email, subject, htmlBody, textBody, attachments, &result)
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != tc.want || result.Success != (tc.want == invitationSent) || calls != 1 ||
+				!strings.Contains(string(data), `"outcome":"`+string(tc.want)+`"`) || strings.Contains(string(data), "private provider payload") {
+				t.Fatalf("incorrect or unsafe invitation outcome: %s", data)
+			}
+		})
 	}
 }
