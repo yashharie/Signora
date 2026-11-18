@@ -23,9 +23,11 @@ import (
 
 // Mailer sends email through HTTPS APIs (Resend, Brevo) or standard SMTP servers.
 type Mailer struct {
-	Host, Port, User, Pass string
-	ResendKey, ResendFrom  string
-	BrevoKey, BrevoSender  string
+	Host, Port, User, Pass     string
+	ResendKey, ResendFrom      string
+	BrevoKey, BrevoSender      string
+	DeliveryProvider, FromName string
+	brevoClient                *http.Client
 }
 
 type Attachment struct {
@@ -36,6 +38,14 @@ type Attachment struct {
 func (m *Mailer) Provider() string {
 	if m == nil {
 		return "none"
+	}
+	if selected := strings.ToLower(strings.TrimSpace(m.DeliveryProvider)); selected != "" {
+		switch selected {
+		case "brevo", "smtp", "resend":
+			return selected
+		default:
+			return "none"
+		}
 	}
 	if strings.TrimSpace(m.ResendKey) != "" {
 		return "resend"
@@ -50,7 +60,18 @@ func (m *Mailer) Provider() string {
 }
 
 func (m *Mailer) Configured() bool {
-	return m != nil && m.Provider() != "none"
+	if m == nil {
+		return false
+	}
+	switch m.Provider() {
+	case "brevo":
+		return strings.TrimSpace(m.BrevoKey) != "" && (strings.TrimSpace(m.BrevoSender) != "" || strings.TrimSpace(m.User) != "")
+	case "smtp":
+		return strings.TrimSpace(m.User) != "" && strings.TrimSpace(m.Pass) != ""
+	case "resend":
+		return strings.TrimSpace(m.ResendKey) != ""
+	}
+	return false
 }
 
 // Send delivers one email. Returns an error (never panics) so callers can report per recipient.
@@ -62,7 +83,7 @@ func (m *Mailer) Send(to, subject, htmlBody, textBody string, attachments []Atta
 	}
 
 	// 1. Resend API (HTTPS port 443 - works everywhere, never blocked on Railway)
-	if strings.TrimSpace(m.ResendKey) != "" {
+	if m.Provider() == "resend" {
 		if err := m.sendViaResend(to, subject, htmlBody, textBody, attachments); err != nil {
 			log.Printf("[MAILER RESEND ERROR] Delivery to %s failed: %v", to, err)
 			return err
@@ -72,12 +93,12 @@ func (m *Mailer) Send(to, subject, htmlBody, textBody string, attachments []Atta
 	}
 
 	// 2. Brevo API (HTTPS port 443 - works everywhere, never blocked on Railway)
-	if strings.TrimSpace(m.BrevoKey) != "" {
+	if m.Provider() == "brevo" {
 		if err := m.sendViaBrevo(to, subject, htmlBody, textBody, attachments); err != nil {
-			log.Printf("[MAILER BREVO ERROR] Delivery to %s failed: %v", to, err)
+			log.Printf("[MAILER BREVO ERROR] %v", err)
 			return err
 		}
-		log.Printf("[MAILER BREVO SUCCESS] Email delivered to %s (subject: %q)", to, subject)
+		log.Print("[MAILER BREVO SUCCESS] Email accepted")
 		return nil
 	}
 
@@ -154,13 +175,26 @@ func (m *Mailer) sendViaResend(to, subject, htmlBody, textBody string, atts []At
 	return nil
 }
 
+var defaultBrevoClient = &http.Client{
+	Timeout: 15 * time.Second,
+	// Do not forward the API key to redirected endpoints.
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+func (m *Mailer) senderName() string {
+	if name := strings.TrimSpace(m.FromName); name != "" {
+		return name
+	}
+	return "Signora"
+}
+
 func (m *Mailer) sendViaBrevo(to, subject, htmlBody, textBody string, atts []Attachment) error {
 	senderEmail := strings.TrimSpace(m.BrevoSender)
 	if senderEmail == "" {
 		senderEmail = strings.TrimSpace(m.User)
 	}
 	if senderEmail == "" {
-		return errors.New("brevo requires a sender email: set BREVO_SENDER or SMTP_USER in Railway Variables")
+		return errors.New("brevo requires a sender email: set EMAIL_FROM (or legacy BREVO_SENDER / SMTP_USER) in Railway Variables")
 	}
 
 	type brevoAtt struct {
@@ -180,7 +214,7 @@ func (m *Mailer) sendViaBrevo(to, subject, htmlBody, textBody string, atts []Att
 	}
 
 	payload := map[string]any{
-		"sender":      map[string]string{"name": "Signora", "email": senderEmail},
+		"sender":      map[string]string{"name": m.senderName(), "email": senderEmail},
 		"to":          []map[string]string{{"email": to}},
 		"subject":     subject,
 		"htmlContent": htmlBody,
@@ -202,16 +236,23 @@ func (m *Mailer) sendViaBrevo(to, subject, htmlBody, textBody string, atts []Att
 	req.Header.Set("api-key", strings.TrimSpace(m.BrevoKey))
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := m.brevoClient
+	if client == nil {
+		client = defaultBrevoClient
+	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("brevo HTTPS request failed: %w", err)
+		return errors.New("brevo HTTPS request failed or timed out")
 	}
 	defer resp.Body.Close()
 
-	bodyBytes, _ := io.ReadAll(resp.Body)
+	// Never return provider response bodies: they can echo credentials or reset links.
+	_, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("brevo error (%d): %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("brevo rejected email (HTTP %d)", resp.StatusCode)
+	}
+	if readErr != nil {
+		return errors.New("brevo response could not be read")
 	}
 	return nil
 }

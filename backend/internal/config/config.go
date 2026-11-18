@@ -11,6 +11,7 @@ type Config struct {
 	SMTPHost, SMTPPort, SMTPUser, SMTPPass                          string
 	ResendKey, ResendFrom                                           string
 	BrevoKey, BrevoSender                                           string
+	EmailProvider, EmailFromName                                    string
 }
 
 func Load() Config {
@@ -67,26 +68,28 @@ func Load() Config {
 	resendKey := getFirst("RESEND_API_KEY", "RESEND_KEY")
 	resendFrom := getFirst("RESEND_FROM", "MAIL_FROM")
 	brevoKey := getFirst("BREVO_API_KEY", "SENDINBLUE_API_KEY")
-	brevoSender := getFirst("BREVO_SENDER", "BREVO_EMAIL")
+	brevoSender := getFirst("EMAIL_FROM", "BREVO_SENDER", "BREVO_EMAIL")
 	if brevoSender == "" {
 		brevoSender = user
 	}
 
 	return Config{
-		Port:        getFirstDefault("8080", "PORT"),
-		DatabaseURL: getFirstDefault("postgres://postgres:postgres@localhost:5432/signora_db?sslmode=disable", "DATABASE_URL"),
-		JWTSecret:   getFirstDefault("development_only_change_me", "JWT_SECRET"),
-		FrontendURL: strings.TrimRight(frontendURL, "/"),
-		UploadDir:   getFirstDefault("./uploads", "UPLOAD_DIR"),
-		SignedDir:   getFirstDefault("./signed", "SIGNED_DIR"),
-		SMTPHost:    strings.TrimSpace(host),
-		SMTPPort:    strings.TrimSpace(port),
-		SMTPUser:    user,
-		SMTPPass:    pass,
-		ResendKey:   resendKey,
-		ResendFrom:  resendFrom,
-		BrevoKey:    brevoKey,
-		BrevoSender: brevoSender,
+		Port:          getFirstDefault("8080", "PORT"),
+		DatabaseURL:   getFirstDefault("postgres://postgres:postgres@localhost:5432/signora_db?sslmode=disable", "DATABASE_URL"),
+		JWTSecret:     getFirstDefault("development_only_change_me", "JWT_SECRET"),
+		FrontendURL:   strings.TrimRight(frontendURL, "/"),
+		UploadDir:     getFirstDefault("./uploads", "UPLOAD_DIR"),
+		SignedDir:     getFirstDefault("./signed", "SIGNED_DIR"),
+		SMTPHost:      strings.TrimSpace(host),
+		SMTPPort:      strings.TrimSpace(port),
+		SMTPUser:      user,
+		SMTPPass:      pass,
+		ResendKey:     resendKey,
+		ResendFrom:    resendFrom,
+		EmailProvider: strings.ToLower(getFirst("EMAIL_PROVIDER")),
+		EmailFromName: getFirstDefault("Signora", "EMAIL_FROM_NAME"),
+		BrevoKey:      brevoKey,
+		BrevoSender:   brevoSender,
 	}
 }
 

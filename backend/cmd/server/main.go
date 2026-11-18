@@ -31,14 +31,16 @@ func main() {
 	}
 
 	mailer := &services.Mailer{
-		Host:        cfg.SMTPHost,
-		Port:        cfg.SMTPPort,
-		User:        cfg.SMTPUser,
-		Pass:        cfg.SMTPPass,
-		ResendKey:   cfg.ResendKey,
-		ResendFrom:  cfg.ResendFrom,
-		BrevoKey:    cfg.BrevoKey,
-		BrevoSender: cfg.BrevoSender,
+		Host:             cfg.SMTPHost,
+		Port:             cfg.SMTPPort,
+		User:             cfg.SMTPUser,
+		Pass:             cfg.SMTPPass,
+		ResendKey:        cfg.ResendKey,
+		ResendFrom:       cfg.ResendFrom,
+		BrevoKey:         cfg.BrevoKey,
+		BrevoSender:      cfg.BrevoSender,
+		DeliveryProvider: cfg.EmailProvider,
+		FromName:         cfg.EmailFromName,
 	}
 	if !mailer.Configured() {
 		log.Println("WARNING: No email provider configured (set RESEND_API_KEY, BREVO_API_KEY, or SMTP_USER/SMTP_PASS in Railway Variables).")

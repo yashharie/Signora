@@ -100,3 +100,36 @@ only SHA-256 hashes are stored. Consuming a token and updating the bcrypt passwo
 are atomic. A new request replaces the previous token. Passwords must contain
 8-72 bytes. Resetting does not automatically log in; existing JWT sessions retain
 their normal expiry (up to seven days).
+
+## Brevo HTTPS email on Railway
+
+Set these variables only on the backend service (never NEXT_PUBLIC variables):
+
+```text
+EMAIL_PROVIDER=brevo
+BREVO_API_KEY=<your Brevo transactional API key>
+EMAIL_FROM=<your verified Brevo sender address>
+EMAIL_FROM_NAME=Signora
+```
+
+Brevo sends through HTTPS to `https://api.brevo.com/v3/smtp/email` (port 443).
+Verify the sender in Brevo and enable transactional email for the account.
+`FRONTEND_URL` must remain the public frontend origin for reset links.
+The recipient is the address submitted for the registered account, independently
+of EMAIL_FROM. Existing token expiry, hashes and single-use validation are unchanged.
+No database changes are required for this integration; the password_resets table
+from the Forgot Password feature must already exist.
+
+For the original SMTP transport use `EMAIL_PROVIDER=smtp` with existing
+`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, and `SMTP_PASS` settings. Explicit selection
+does not fall back to another provider on failure. If EMAIL_PROVIDER is unset,
+legacy automatic selection remains Resend, then Brevo, then SMTP. BREVO_SENDER
+and SMTP_USER remain legacy sender fallbacks; EMAIL_FROM takes precedence.
+The shared mailer also retains signing invitations, completion emails and PDF
+attachments. Requests time out after 15 seconds, redirects are rejected, and
+Brevo error response bodies are never returned or logged. No automatic retry is
+performed to avoid duplicate messages. API acceptance does not guarantee inbox delivery.
+
+Local verification: `go test ./...` in backend, `npm test` in backend, and
+`npm run build` in frontend. Brevo tests use a mock HTTP transport; they send no
+real email and need no API key.
