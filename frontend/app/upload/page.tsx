@@ -1,12 +1,151 @@
 'use client';
-import { ChangeEvent,FormEvent,useEffect,useState } from 'react';
+
+import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { FileUp,ArrowLeft } from 'lucide-react';
+import { FileUp, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
 import Nav from '@/components/Nav';
-import { api,getError } from '@/lib/api';
-export default function UploadPage(){const router=useRouter();const [title,setTitle]=useState('');const [file,setFile]=useState<File|null>(null);const [error,setError]=useState('');const [loading,setLoading]=useState(false);
-useEffect(()=>{if(!localStorage.getItem('token'))router.replace('/login');},[]);
-function choose(e:ChangeEvent<HTMLInputElement>){const f=e.target.files?.[0]||null;setError('');if(!f){setFile(null);return;}if(f.type!=='application/pdf'&&!f.name.toLowerCase().endsWith('.pdf')){setError('Only PDF files are accepted.');setFile(null);return;}if(f.size>20*1024*1024){setError('File size must be 20MB or less.');setFile(null);return;}setFile(f);if(!title)setTitle(f.name.replace(/\.pdf$/i,''));}
-async function submit(e:FormEvent){e.preventDefault();setError('');if(!file){setError('Please select a PDF file.');return;}if(!title.trim()){setError('Please enter a document title.');return;}const data=new FormData();data.append('title',title);data.append('file',file);setLoading(true);try{const res=await api.post('/api/documents/upload',data);router.push('/documents/' + res.data.document.id + '/signers');}catch(e){setError(getError(e));}finally{setLoading(false);}}
-return <><Nav/><main className="shell" style={{maxWidth:720}}><Link href="/dashboard" className="muted" style={{display:'inline-flex',gap:6,alignItems:'center',marginBottom:20}}><ArrowLeft size={16}/> Back to dashboard</Link><section className="card"><h1 className="title">Upload PDF</h1><p className="muted">Select a PDF document. Maximum file size: 20MB.</p>{error&&<p className="error">{error}</p>}<form onSubmit={submit}><div className="field"><label>Document title</label><input required value={title} onChange={e=>setTitle(e.target.value)} placeholder="e.g. Employment Agreement"/></div><div className="field"><label>PDF document</label><label className="drop" htmlFor="pdf-file" style={{cursor:'pointer'}}><FileUp size={38} color="#6366f1"/><p><strong>{file?file.name:'Choose a PDF file'}</strong></p><p className="muted">Click to browse · PDF only · Up to 20MB</p><input id="pdf-file" type="file" accept="application/pdf,.pdf" onChange={choose} style={{display:'none'}}/></label></div>{file&&<p className="success">Selected: {file.name} ({(file.size/1024/1024).toFixed(2)} MB)</p>}<button className="btn" disabled={loading} style={{width:'100%',marginTop:12}}>{loading?'Uploading...':'Upload document'}</button></form></section></main></>}
+import { api, getError } from '@/lib/api';
+
+const maxSigners = 100;
+const signerEmail = /^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$/i;
+
+export default function UploadPage() {
+  const router = useRouter();
+  const [step, setStep] = useState<'signers' | 'pdf'>('signers');
+  const [signers, setSigners] = useState([{ name: '', email: '' }]);
+  const [count, setCount] = useState('1');
+  const [title, setTitle] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!localStorage.getItem('token')) router.replace('/login');
+  }, [router]);
+
+  function changeCount(value: string) {
+    setCount(value);
+    const next = Number(value);
+    if (!Number.isInteger(next) || next < 1 || next > maxSigners) return;
+    setSigners((current) => Array.from({ length: next }, (_, index) => current[index] ?? { name: '', email: '' }));
+  }
+
+  function updateSigner(index: number, field: 'name' | 'email', value: string) {
+    setSigners((current) => current.map((signer, i) => i === index ? { ...signer, [field]: value } : signer));
+  }
+
+  function continueToPDF(event: FormEvent) {
+    event.preventDefault();
+    setError('');
+    const emails = signers.map((signer) => signer.email.trim().toLowerCase());
+    if (signers.some((signer) => !signer.name.trim()) || emails.some((email) => !signerEmail.test(email))) {
+      setError('Enter a name and valid email address for every signer.');
+      return;
+    }
+    if (new Set(emails).size !== emails.length) {
+      setError('Each signer must have a different email address.');
+      return;
+    }
+    setStep('pdf');
+  }
+
+  function choosePDF(event: ChangeEvent<HTMLInputElement>) {
+    const selected = event.target.files?.[0] ?? null;
+    setError('');
+    setFile(null);
+    if (!selected) return;
+    if (!selected.name.toLowerCase().endsWith('.pdf')) {
+      setError('Only PDF files are accepted.');
+      return;
+    }
+    if (selected.size > 20 * 1024 * 1024) {
+      setError('File size must be 20 MB or less.');
+      return;
+    }
+    setFile(selected);
+    if (!title) setTitle(selected.name.replace(/\.pdf$/i, ''));
+  }
+
+  async function uploadPDF(event: FormEvent) {
+    event.preventDefault();
+    if (loading) return;
+    setError('');
+    if (!file || !title.trim()) {
+      setError('Enter a document title and choose a PDF.');
+      return;
+    }
+    const data = new FormData();
+    data.append('title', title);
+    data.append('file', file);
+    data.append('signers', JSON.stringify(signers));
+    setLoading(true);
+    try {
+      const { data: result } = await api.post('/api/documents/upload', data);
+      router.push('/documents/' + result.document.id + '/prepare');
+    } catch (err) {
+      setError(getError(err));
+      setLoading(false);
+    }
+  }
+
+  return (
+    <>
+      <Nav />
+      <main className="shell" style={{ maxWidth: 720 }}>
+        <Link href="/dashboard" className="muted" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', marginBottom: 20 }}>
+          <ArrowLeft size={16} /> Back to dashboard
+        </Link>
+        <section className="card">
+          <h1 className="title">{step === 'signers' ? '1. Add signers' : '2. Upload PDF'}</h1>
+          {error && <p className="error" role="alert">{error}</p>}
+          {step === 'signers' ? (
+            <form onSubmit={continueToPDF}>
+              <div className="field">
+                <label htmlFor="signer-count">Number of signers</label>
+                <input id="signer-count" type="number" min={1} max={maxSigners} required value={count} onChange={(event) => changeCount(event.target.value)} />
+              </div>
+              {signers.map((signer, index) => (
+                <fieldset key={index} style={{ marginBottom: 16 }}>
+                  <legend>Signer {index + 1}</legend>
+                  <div className="field">
+                    <label htmlFor={'name-' + index}>Name</label>
+                    <input id={'name-' + index} required maxLength={120} value={signer.name}
+                      onChange={(event) => updateSigner(index, 'name', event.target.value)} />
+                  </div>
+                  <div className="field">
+                    <label htmlFor={'email-' + index}>Email</label>
+                    <input id={'email-' + index} type="email" required maxLength={255} value={signer.email}
+                      onChange={(event) => updateSigner(index, 'email', event.target.value)} />
+                  </div>
+                </fieldset>
+              ))}
+              <button className="btn" type="submit">Continue to PDF Upload</button>
+            </form>
+          ) : (
+            <form onSubmit={uploadPDF}>
+              <p className="muted">Upload the PDF for {signers.length} {signers.length === 1 ? 'signer' : 'signers'}. Maximum file size is 20 MB.</p>
+              <div className="field">
+                <label htmlFor="document-title">Document title</label>
+                <input id="document-title" required value={title} onChange={(event) => setTitle(event.target.value)} />
+              </div>
+              <div className="field">
+                <label htmlFor="pdf-file">PDF document</label>
+                <input id="pdf-file" type="file" accept="application/pdf,.pdf" onChange={choosePDF} />
+              </div>
+              {file && <p className="muted">Selected: {file.name}</p>}
+              <div className="actions">
+                <button type="button" className="btn secondary" disabled={loading} onClick={() => { setError(''); setStep('signers'); }}>
+                  <ArrowLeft size={16} /> Back to Signers
+                </button>
+                <button type="submit" className="btn" disabled={loading}>
+                  <FileUp size={16} /> {loading ? 'Uploading...' : 'Upload and Place Signature Boxes'}
+                </button>
+              </div>
+            </form>
+          )}
+        </section>
+      </main>
+    </>
+  );
+}

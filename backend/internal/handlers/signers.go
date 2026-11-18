@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"phase1-signora/backend/internal/middleware"
 	"phase1-signora/backend/internal/models"
 	"phase1-signora/backend/internal/services"
@@ -30,7 +30,7 @@ var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-
 const signingLinkTTL = 7 * 24 * time.Hour
 
 type SignersHandler struct {
-	DB          *pgxpool.Pool
+	DB          queryDB
 	FrontendURL string
 	UploadDir   string
 	Mailer      *services.Mailer
@@ -232,6 +232,7 @@ type sendTarget struct {
 	ExpiresAt              time.Time
 	EmailSent              bool
 	AttemptedAt            *time.Time
+	HasBox                 bool
 }
 
 type emailResult struct {
@@ -269,6 +270,25 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.CurrentUserID(r)
 	ip := utils.ClientIP(r)
 
+	var selection struct {
+		SignerIDs []string `json:"signerIds"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10))
+	if err := decoder.Decode(&selection); err != nil || decoder.Decode(new(any)) != io.EOF || len(selection.SignerIDs) == 0 {
+		utils.Error(w, 400, "Select at least one signer")
+		return
+	}
+	seen := make(map[uuid.UUID]bool, len(selection.SignerIDs))
+	for i, value := range selection.SignerIDs {
+		id, err := uuid.Parse(value)
+		if err != nil || seen[id] {
+			utils.Error(w, 400, "Selected signer IDs must be valid and unique")
+			return
+		}
+		seen[id] = true
+		selection.SignerIDs[i] = id.String()
+	}
+
 	var docTitle, status, storedName, originalName string
 	err := h.DB.QueryRow(ctx, `SELECT title, status, stored_name, original_name FROM documents WHERE id=$1 AND user_id=$2`, docID, userID).
 		Scan(&docTitle, &status, &storedName, &originalName)
@@ -281,54 +301,14 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Must have at least 1 signer
-	var signerCount int
-	err = h.DB.QueryRow(ctx, `SELECT COUNT(*) FROM signers WHERE document_id=$1`, docID).Scan(&signerCount)
-	if err != nil {
-		utils.Error(w, 500, "Could not verify document signers")
-		return
-	}
-	if signerCount == 0 {
-		utils.Error(w, 400, "Please add at least one signer before sending the document")
-		return
-	}
-
-	// 2. Every box must be linked to a signer
-	var unassignedBoxes int
-	err = h.DB.QueryRow(ctx, `SELECT COUNT(*) FROM signature_boxes WHERE document_id=$1 AND signer_id IS NULL`, docID).Scan(&unassignedBoxes)
-	if err != nil {
-		utils.Error(w, 500, "Could not verify signature box assignments")
-		return
-	}
-	if unassignedBoxes > 0 {
-		utils.Error(w, 400, fmt.Sprintf("There are %d signature box(es) not yet assigned to a signer. Please assign all boxes first.", unassignedBoxes))
-		return
-	}
-	var signersWithoutBoxes int
-	err = h.DB.QueryRow(ctx, `
-		SELECT COUNT(*) FROM signers s
-		WHERE s.document_id=$1 AND s.status <> 'signed'
-		  AND NOT EXISTS (
-		    SELECT 1 FROM signature_boxes b
-		    WHERE b.document_id=s.document_id AND b.signer_id=s.id
-		  )
-	`, docID).Scan(&signersWithoutBoxes)
-	if err != nil {
-		utils.Error(w, 500, "Could not verify signer signature boxes")
-		return
-	}
-	if signersWithoutBoxes > 0 {
-		utils.Error(w, 400, "Every pending signer must have at least one assigned signature box")
-		return
-	}
-
-	// 3. Load the signers who still need to sign
+	// Validate the entire selection before claiming or sending any invitation.
 	rows, err := h.DB.Query(ctx, `
-		SELECT id, name, email, token, token_expires_at, email_sent, email_sent_at
-		FROM signers
-		WHERE document_id=$1 AND status <> 'signed'
+		SELECT s.id, s.name, s.email, s.token, s.token_expires_at, s.email_sent, s.email_sent_at,
+			EXISTS (SELECT 1 FROM signature_boxes b WHERE b.document_id=s.document_id AND b.signer_id=s.id)
+		FROM signers s
+		WHERE s.document_id=$1 AND s.id=ANY($2::text[]::uuid[]) AND s.status='pending'
 		ORDER BY created_at ASC
-	`, docID)
+	`, docID, selection.SignerIDs)
 	if err != nil {
 		utils.Error(w, 500, "Could not load signers")
 		return
@@ -336,7 +316,7 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 	var targets []sendTarget
 	for rows.Next() {
 		var t sendTarget
-		if err := rows.Scan(&t.ID, &t.Name, &t.Email, &t.Token, &t.ExpiresAt, &t.EmailSent, &t.AttemptedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Email, &t.Token, &t.ExpiresAt, &t.EmailSent, &t.AttemptedAt, &t.HasBox); err != nil {
 			rows.Close()
 			utils.Error(w, 500, "Could not read signers")
 			return
@@ -349,9 +329,15 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	if len(targets) == 0 {
-		utils.Error(w, 400, "All signers have already signed this document")
+	if len(targets) != len(selection.SignerIDs) {
+		utils.Error(w, 400, "Every selected signer must be pending and belong to this document")
 		return
+	}
+	for _, target := range targets {
+		if !target.HasBox {
+			utils.Error(w, 400, "Every selected signer must have at least one assigned signature box")
+			return
+		}
 	}
 
 	sender := userLabel(ctx, h.DB, userID)
@@ -361,7 +347,7 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if status == "draft" {
-		if _, err := h.DB.Exec(ctx, `UPDATE documents SET status='pending' WHERE id=$1 AND status='draft'`, docID); err != nil {
+		if _, err := h.DB.Exec(ctx, `UPDATE documents SET status='pending' WHERE id=$1 AND user_id=$2 AND status='draft'`, docID, userID); err != nil {
 			utils.Error(w, 500, "Could not update document status")
 			return
 		}
@@ -382,7 +368,7 @@ func (h SignersHandler) Send(w http.ResponseWriter, r *http.Request) {
 		current := t
 		claimed := false
 		if t.canClaim(time.Now()) {
-			current, claimed, err = h.claimInvitation(ctx, docID, t)
+			current, claimed, err = h.claimInvitation(ctx, docID, userID, t)
 			if err != nil {
 				res.Error = "Could not prepare the invitation"
 			}
@@ -442,7 +428,7 @@ func (t sendTarget) canClaim(now time.Time) bool {
 	return !now.Before(t.ExpiresAt) || (!t.EmailSent && t.AttemptedAt == nil)
 }
 
-func (h SignersHandler) claimInvitation(ctx context.Context, docID string, t sendTarget) (sendTarget, bool, error) {
+func (h SignersHandler) claimInvitation(ctx context.Context, docID, userID string, t sendTarget) (sendTarget, bool, error) {
 	now := time.Now()
 	token := t.Token
 	if !now.Before(t.ExpiresAt) {
@@ -461,9 +447,9 @@ func (h SignersHandler) claimInvitation(ctx context.Context, docID string, t sen
 		WHERE s.id=$1 AND s.document_id=$2 AND s.status <> 'signed' AND s.token=$5
 		  AND (s.token_expires_at <= NOW() OR (NOT s.email_sent AND s.email_sent_at IS NULL))
 		  AND EXISTS (SELECT 1 FROM signature_boxes b WHERE b.document_id=s.document_id AND b.signer_id=s.id)
-		  AND EXISTS (SELECT 1 FROM documents d WHERE d.id=s.document_id AND d.status='pending')
+		  AND EXISTS (SELECT 1 FROM documents d WHERE d.id=s.document_id AND d.user_id=$6 AND d.status='pending')
 		RETURNING token, token_expires_at, email_sent, email_sent_at
-	`, t.ID, docID, token, now.Add(signingLinkTTL), t.Token).
+	`, t.ID, docID, token, now.Add(signingLinkTTL), t.Token, userID).
 		Scan(&current.Token, &current.ExpiresAt, &current.EmailSent, &current.AttemptedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = h.DB.QueryRow(ctx, `SELECT token, token_expires_at, email_sent, email_sent_at

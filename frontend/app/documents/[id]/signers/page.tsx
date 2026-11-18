@@ -14,6 +14,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import Nav from '@/components/Nav';
+import InvitationResults, { type InvitationResult } from '@/components/InvitationResults';
 import WorkflowStepper from '@/components/WorkflowStepper';
 import { api, getError } from '@/lib/api';
 import { signingLink } from '@/lib/signing-link';
@@ -40,31 +41,6 @@ interface SignerLink {
   email: string;
   token: string;
   signingUrl: string;
-}
-
-const invitationLabels = {
-  sent: 'Sent',
-  failed: 'Failed',
-  already_sent: 'Already Sent',
-  unconfirmed: 'Unconfirmed',
-  sent_without_pdf: 'Sent Without PDF Attachment',
-};
-
-interface InvitationResult {
-  name: string;
-  email: string;
-  outcome?: keyof typeof invitationLabels;
-  success: boolean;
-  alreadySent?: boolean;
-  error?: string;
-  attachmentError?: string;
-}
-
-function invitationLabel(result: InvitationResult) {
-  if (result.outcome) return invitationLabels[result.outcome];
-  if (result.alreadySent) return invitationLabels.already_sent;
-  if (result.success) return result.attachmentError ? invitationLabels.sent_without_pdf : invitationLabels.sent;
-  return result.error?.includes('could not be confirmed') ? invitationLabels.unconfirmed : invitationLabels.failed;
 }
 
 export default function SignersPage({ params }: { params: Promise<{ id: string }> }) {
@@ -218,7 +194,8 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
       setError('');
       setSuccess('');
       setInvitationResults([]);
-      const res = await api.post(`/api/documents/${docId}/send`);
+      const signerIds = signers.filter((signer) => signer.status === 'pending').map((signer) => signer.id);
+      const res = await api.post(`/api/documents/${docId}/send`, { signerIds });
       setDocStatus('pending');
       const links: SignerLink[] = res.data.links || [];
       setSigners((current) => current.map((signer) => {
@@ -334,7 +311,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
         </div>
 
         <WorkflowStepper docId={docId} currentStep="signers" />
-        <p className="muted">Send for Signing automatically emails each assigned signer their secure signing link and the PDF when it can be attached.</p>
+        <p className="muted">Send for Signing emails all pending signers from this page. To choose specific recipients, use Prepare &amp; Send.</p>
 
         {error && <div className="error" style={{ marginBottom: 14, whiteSpace: 'pre-line' }}>{error}</div>}
         {success && <div className="success" style={{ marginBottom: 14 }}>{success}</div>}
@@ -491,23 +468,7 @@ if (returnBox !== null && /^\d+$/.test(returnBox)) {
           </div>
         </div>
 
-        <div role="status" aria-live="polite">
-          {invitationResults.length > 0 && (
-            <section className="card" style={{ marginTop: 16 }}>
-              <h2 style={{ fontSize: 18, marginTop: 0 }}>Email Invitation Results</h2>
-              <p className="muted">Sent means the mail provider accepted the email.</p>
-              <ul style={{ paddingLeft: 20 }}>
-                {invitationResults.map((result) => (
-                  <li key={result.email} style={{ marginBottom: 8 }}>
-                    <strong>{result.name}</strong> ({result.email}) — {invitationLabel(result)}
-                    {result.error && <div className="muted">{result.error}</div>}
-                    {result.attachmentError && <div className="muted">{result.attachmentError}</div>}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          )}
-        </div>
+        <InvitationResults results={invitationResults} />
 
         {shareableSigners.length > 0 && (
           <details className="card" style={{ marginTop: 16 }}>

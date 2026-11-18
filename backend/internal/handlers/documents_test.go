@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,7 @@ import (
 )
 
 type documentViewDB struct {
-	documentDB
+	queryDB
 	row func(context.Context, string, ...any) pgx.Row
 }
 
@@ -27,6 +28,30 @@ type documentViewRow func(...any) error
 
 func (row documentViewRow) Scan(dest ...any) error {
 	return row(dest...)
+}
+
+func TestParseUploadSigners(t *testing.T) {
+	signers, err := parseUploadSigners(`[{"name":" Alice ","email":" ALICE@example.com "},{"name":"Bob","email":"bob@example.com"}]`)
+	if err != nil || len(signers) != 2 || signers[0].Name != "Alice" || signers[0].Email != "alice@example.com" {
+		t.Fatalf("signer details were not normalized: %v", err)
+	}
+	signers[0].Token = "test-token"
+	data, err := json.Marshal(signers)
+	if err != nil || !strings.Contains(string(data), `"name":"Alice","email":"alice@example.com","token":"test-token"`) {
+		t.Fatal("signer fields did not serialize for atomic insertion")
+	}
+	for _, raw := range []string{
+		`[]`, `null`, `{"email":"alice@example.com"}`,
+		`[{"name":"Alice","email":"invalid"}]`,
+		`[{"name":"Alice","email":"alice@example.com"},{"name":"Bob","email":"ALICE@example.com"}]`,
+	} {
+		if _, err := parseUploadSigners(raw); err == nil {
+			t.Fatal("invalid signer list was accepted")
+		}
+	}
+	if legacy, err := parseUploadSigners(""); err != nil || len(legacy) != 0 {
+		t.Fatal("legacy upload without signer details should still work")
+	}
 }
 
 func TestViewOriginalPDF(t *testing.T) {

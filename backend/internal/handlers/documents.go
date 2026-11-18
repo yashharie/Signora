@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,18 +22,49 @@ import (
 	"phase1-signora/backend/internal/utils"
 )
 
-type documentDB interface {
+type queryDB interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
 type DocumentHandler struct {
-	DB        documentDB
+	DB        queryDB
 	UploadDir string
 }
 
 const maxUpload = 20 << 20
+const maxUploadSigners = 100
+
+type uploadSigner struct {
+	addSignerInput
+	Token string `json:"token"`
+}
+
+func parseUploadSigners(raw string) ([]uploadSigner, error) {
+	if raw == "" {
+		return []uploadSigner{}, nil
+	}
+	var signers []addSignerInput
+	if err := json.Unmarshal([]byte(raw), &signers); err != nil || len(signers) < 1 || len(signers) > maxUploadSigners {
+		return nil, fmt.Errorf("Provide between 1 and %d signers", maxUploadSigners)
+	}
+	seen := make(map[string]bool, len(signers))
+	result := make([]uploadSigner, 0, len(signers))
+	for i, signer := range signers {
+		signer.Name = strings.TrimSpace(signer.Name)
+		signer.Email = strings.ToLower(strings.TrimSpace(signer.Email))
+		if signer.Name == "" || utf8.RuneCountInString(signer.Name) > 120 || len(signer.Email) > 255 || !emailRegex.MatchString(signer.Email) || strings.ContainsRune(signer.Name, 0) {
+			return nil, fmt.Errorf("Signer %d needs a valid name and email address", i+1)
+		}
+		if seen[signer.Email] {
+			return nil, errors.New("Each signer must have a different email address")
+		}
+		seen[signer.Email] = true
+		result = append(result, uploadSigner{addSignerInput: signer})
+	}
+	return result, nil
+}
 
 func (h DocumentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	userID := middleware.CurrentUserID(r)
@@ -43,6 +76,11 @@ func (h DocumentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	title := strings.TrimSpace(r.FormValue("title"))
 	if title == "" {
 		utils.Error(w, 400, "Document title is required")
+		return
+	}
+	signers, err := parseUploadSigners(r.FormValue("signers"))
+	if err != nil {
+		utils.Error(w, 400, err.Error())
 		return
 	}
 	file, header, err := r.FormFile("file")
@@ -69,6 +107,18 @@ func (h DocumentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		utils.Error(w, 400, "Uploaded file is not a valid PDF")
 		return
 	}
+	for i := range signers {
+		signers[i].Token, err = generateSecureToken()
+		if err != nil {
+			utils.Error(w, 500, "Could not create secure signing links")
+			return
+		}
+	}
+	signerData, err := json.Marshal(signers)
+	if err != nil {
+		utils.Error(w, 500, "Could not prepare document signers")
+		return
+	}
 
 	if err = os.MkdirAll(h.UploadDir, 0755); err != nil {
 		utils.Error(w, 500, "Storage is unavailable")
@@ -84,10 +134,17 @@ func (h DocumentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 
 	var docID string
 	err = h.DB.QueryRow(r.Context(), `
-		INSERT INTO documents(id, user_id, title, original_name, stored_name, file_size, status, file_data)
-		VALUES($1, $2, $3, $4, $5, $6, 'draft', $7)
-		RETURNING id
-	`, id, userID, title, filepath.Base(header.Filename), stored, size, fileBytes).Scan(&docID)
+		WITH uploaded AS (
+			INSERT INTO documents(id, user_id, title, original_name, stored_name, file_size, status, file_data)
+			VALUES($1, $2, $3, $4, $5, $6, 'draft', $7)
+			RETURNING id
+		), initial_signers AS (
+			INSERT INTO signers(document_id, name, email, token, token_expires_at)
+			SELECT uploaded.id, signer.name, signer.email, signer.token, $9
+			FROM uploaded CROSS JOIN jsonb_to_recordset($8::jsonb) AS signer(name text, email text, token text)
+		)
+		SELECT id FROM uploaded
+	`, id, userID, title, filepath.Base(header.Filename), stored, size, fileBytes, string(signerData), time.Now().Add(signingLinkTTL)).Scan(&docID)
 	if err != nil {
 		_ = os.Remove(dest)
 		utils.Error(w, 500, "Could not save document details")
@@ -97,6 +154,10 @@ func (h DocumentHandler) Upload(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO audit_logs (document_id, action, performed_by, details)
 		VALUES ($1, 'DOCUMENT_UPLOADED', 'Sender', $2)
 	`, docID, fmt.Sprintf("Document uploaded: %s (%s)", title, filepath.Base(header.Filename)))
+	if len(signers) > 0 {
+		logAudit(r.Context(), h.DB, docID, "SIGNER_ADDED", userLabel(r.Context(), h.DB, userID),
+			fmt.Sprintf("Added %d signer(s) during upload", len(signers)), utils.ClientIP(r))
+	}
 	utils.JSON(w, 201, map[string]any{"message": "PDF uploaded successfully", "document": map[string]any{"id": docID, "title": title, "originalName": filepath.Base(header.Filename), "fileSize": size, "status": "draft"}})
 }
 func (h DocumentHandler) List(w http.ResponseWriter, r *http.Request) {

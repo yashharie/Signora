@@ -4,12 +4,16 @@ import (
 	"context"
 	"log"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+type auditExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
 
 // LogAudit records one event in the document audit trail.
 // ip may be empty (system events); it is then stored as NULL.
-func LogAudit(ctx context.Context, db *pgxpool.Pool, docID, action, by, details, ip string) {
+func LogAudit(ctx context.Context, db auditExecutor, docID, action, by, details, ip string) {
 	var ipArg any
 	if ip != "" {
 		ipArg = ip

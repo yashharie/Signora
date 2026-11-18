@@ -4,17 +4,16 @@ import (
 	"context"
 	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"phase1-signora/backend/internal/services"
 )
 
 // logAudit writes an audit trail entry (see services.LogAudit).
-func logAudit(ctx context.Context, db *pgxpool.Pool, docID, action, by, details, ip string) {
+func logAudit(ctx context.Context, db queryDB, docID, action, by, details, ip string) {
 	services.LogAudit(ctx, db, docID, action, by, details, ip)
 }
 
 // userLabel returns "Name (email)" for the logged-in sender so audit rows show a real user.
-func userLabel(ctx context.Context, db *pgxpool.Pool, userID string) string {
+func userLabel(ctx context.Context, db queryDB, userID string) string {
 	var name, email string
 	if err := db.QueryRow(ctx, `SELECT name, email FROM users WHERE id=$1`, userID).Scan(&name, &email); err != nil {
 		return "Sender"

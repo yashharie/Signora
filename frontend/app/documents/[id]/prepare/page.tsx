@@ -5,12 +5,14 @@ import { Plus, Trash2, Save, ArrowRight, ArrowLeft, UserCheck } from 'lucide-rea
 import Nav from '@/components/Nav';
 import WorkflowStepper from '@/components/WorkflowStepper';
 import PdfViewer from '@/components/PdfViewer';
-import { api, API_URL, getError } from '@/lib/api';
+import InvitationResults, { type InvitationResult } from '@/components/InvitationResults';
+import { api, getError } from '@/lib/api';
 
 interface Signer {
   id: string;
   name: string;
   email: string;
+  status: 'pending' | 'signed';
 }
 
 interface Box {
@@ -34,6 +36,11 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
   const [pdfData, setPdfData] = useState<ArrayBuffer | null>(null);
   const [signers, setSigners] = useState<Signer[]>([]);
   const [boxes, setBoxes] = useState<Box[]>([]);
+  const [savedBoxes, setSavedBoxes] = useState<Box[] | null>(null);
+  const [checkedSignerIds, setCheckedSignerIds] = useState<string[]>([]);
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState('');
+  const [invitationResults, setInvitationResults] = useState<InvitationResult[]>([]);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [totalPages, setTotalPages] = useState<number>(1);
   const [pdfPagesLoaded, setPdfPagesLoaded] = useState(false);
@@ -89,6 +96,9 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
           boxIndex < loadedBoxes.length &&
           loadedSigners.some((signer) => signer.id === requestedSigner);
         setSigners(loadedSigners);
+        setSavedBoxes(!canAssign && loadedBoxes.length > 0 ? loadedBoxes : null);
+        setCheckedSignerIds([]);
+        setInvitationResults([]);
         setBoxes(canAssign
           ? loadedBoxes.map((box, index) => index === boxIndex
             ? { ...box, signerId: requestedSigner }
@@ -119,14 +129,13 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
 
   // Add a new signature box to the current page
   function addBox() {
-    const defaultSigner = signers.length > 0 ? signers[0].id : null;
     const newBox: Box = {
       page: currentPage,
       x: 35, // centered horizontally
       y: 40 + (boxes.filter((b) => b.page === currentPage).length * 8) % 40,
       width: 28, // 28% of page width
       height: 9, // 9% of page height
-      signerId: defaultSigner,
+      signerId: null,
     };
     setBoxes((prev) => [...prev, newBox]);
     setSelectedBoxIndex(boxes.length);
@@ -188,11 +197,11 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
   async function saveBoxes() {
     if (!pdfPagesLoaded) {
       setMessage({ text: 'Wait for the PDF pages to finish loading before saving boxes.', type: 'error' });
-      return;
+      return false;
     }
     if (boxes.some((box) => !Number.isInteger(box.page) || box.page < 1 || box.page > totalPages)) {
       setMessage({ text: 'Every signature box must be placed on an existing PDF page.', type: 'error' });
-      return;
+      return false;
     }
     try {
       setSaving(true);
@@ -207,11 +216,35 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
           height: Math.round(b.height * 100) / 100,
         })),
       });
+      setSavedBoxes(boxes);
+      setCheckedSignerIds([]);
+      setSendError('');
       setMessage({ text: 'Signature boxes saved successfully!', type: 'success' });
+      return true;
     } catch (err) {
       setMessage({ text: getError(err), type: 'error' });
+      return false;
     } finally {
       setSaving(false);
+    }
+  }
+
+  const assignedSignerIds = new Set(savedBoxes?.map((box) => box.signerId));
+  const eligibleSigners = signers.filter((signer) => signer.status === 'pending' && assignedSignerIds.has(signer.id));
+  const selectedSignerIds = eligibleSigners.filter((signer) => checkedSignerIds.includes(signer.id)).map((signer) => signer.id);
+
+  async function sendSelectedSigners() {
+    if (sending || saving || savedBoxes !== boxes || selectedSignerIds.length === 0) return;
+    setSending(true);
+    setSendError('');
+    setInvitationResults([]);
+    try {
+      const { data } = await api.post(`/api/documents/${docId}/send`, { signerIds: selectedSignerIds });
+      setInvitationResults(data.emailResults || []);
+    } catch (err) {
+      setSendError(getError(err));
+    } finally {
+      setSending(false);
     }
   }
 
@@ -310,7 +343,7 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
       <main className="shell">
         <div className="row" style={{ marginBottom: 14 }}>
           <div>
-            <h1 className="title">Place Signature Boxes</h1>
+            <h1 className="title">3. Assign Signature Boxes</h1>
             <p className="muted" style={{ margin: 0 }}>
               {docTitle ? `Document: ${docTitle}` : 'Position signature fields on the PDF pages.'}
             </p>
@@ -330,9 +363,9 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
             </button>
             <button
               className="btn success"
+              disabled={saving || loading || !pdfPagesLoaded}
               onClick={async () => {
-                await saveBoxes();
-                router.push(`/documents/${docId}/status`);
+                if (await saveBoxes()) router.push(`/documents/${docId}/status`);
               }}
             >
               Save & View Status <ArrowRight size={16} />
@@ -416,6 +449,7 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
           </div>
         )}
 
+        <div className={savedBoxes ? 'prepare-invitation-layout' : undefined}>
         {/* PDF Viewer with interactive boxes overlay */}
         <PdfViewer
           pdfData={pdfData}
@@ -519,6 +553,45 @@ export default function PreparePage({ params }: { params: Promise<{ id: string }
             );
           })}
         </PdfViewer>
+        {savedBoxes && (
+          <aside className="card" aria-labelledby="select-signers-heading">
+            <h2 id="select-signers-heading" style={{ marginTop: 0 }}>4. Select Signers</h2>
+            <p className="muted">Only checked signers with saved assignments will receive an email.</p>
+            {savedBoxes !== boxes && <p className="muted">Save your changes before sending invitations.</p>}
+            {sendError && <p className="error" role="alert">{sendError}</p>}
+            <button className="btn success" type="button" onClick={sendSelectedSigners}
+              disabled={sending || saving || savedBoxes !== boxes || selectedSignerIds.length === 0}>
+              {sending ? 'Sending Emails...' : 'Send for Signing'}
+            </button>
+            <ul style={{ listStyle: 'none', padding: 0 }}>
+              {signers.map((signer) => {
+                const assigned = assignedSignerIds.has(signer.id);
+                const ready = assigned && signer.status === 'pending';
+                return (
+                  <li key={signer.id} style={{ marginTop: 12 }}>
+                    <label style={{ display: 'flex', gap: 10, alignItems: 'start', overflowWrap: 'anywhere' }}>
+                      <input type="checkbox" style={{ width: 'auto' }} checked={ready && checkedSignerIds.includes(signer.id)}
+                        disabled={!ready || sending || saving || savedBoxes !== boxes}
+                        onChange={(event) => {
+                          const checked = event.target.checked;
+                          setCheckedSignerIds((current) => checked ? [...current, signer.id] : current.filter((id) => id !== signer.id));
+                        }} />
+                      <span>
+                        <strong>{signer.name}</strong><br />
+                        {signer.email}<br />
+                        <small className="muted">
+                          {signer.status === 'signed' ? 'Already signed' : assigned ? 'Ready · Box assigned' : 'No assigned signature box'}
+                        </small>
+                      </span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+            <InvitationResults results={invitationResults} />
+          </aside>
+        )}
+        </div>
       </main>
     </>
   );
